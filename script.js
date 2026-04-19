@@ -1,16 +1,52 @@
 let account = null;
-let token = null;
 let inboxInterval = null;
+const API_BASE = "/api/tempmail";
+
+async function apiRequest(path, options = {}) {
+    const response = await fetch(`${API_BASE}${path}`, {
+        credentials: "same-origin",
+        ...options,
+        headers: {
+            "Content-Type": "application/json",
+            ...(options.headers || {}),
+        },
+    });
+
+    let data = null;
+    try {
+        data = await response.json();
+    } catch {
+        data = null;
+    }
+
+    return { response, data };
+}
+
+function resetSessionState(clearEmailDisplay = true) {
+    account = null;
+    localStorage.removeItem("tm_email");
+    localStorage.removeItem("tm_read_messages");
+
+    if (inboxInterval) {
+        clearInterval(inboxInterval);
+        inboxInterval = null;
+    }
+
+    if (clearEmailDisplay) {
+        const emailDisplay = document.getElementById("emailDisplay");
+        if (emailDisplay) emailDisplay.innerText = "---";
+    }
+}
 
 async function generateAccount() {
     try {
         const username = Math.random().toString(36).substring(2, 10);
 
-        // Get domains
-        const domainRes = await fetch("https://api.mail.tm/domains");
-        if (!domainRes.ok) { showAlert("Failed to fetch email domains. Please try again."); return; }
+        // Get domains through serverless proxy
+        const domainsResult = await apiRequest("/domains", { method: "GET" });
+        if (!domainsResult.response.ok) { showAlert("Failed to fetch email domains. Please try again."); return; }
 
-        const domainData = await domainRes.json();
+        const domainData = domainsResult.data;
         if (!domainData["hydra:member"] || domainData["hydra:member"].length === 0) {
             showAlert("No email domains available. Please try again later."); return;
         }
@@ -19,33 +55,30 @@ async function generateAccount() {
         const address = `${username}@${domain}`;
         const password = Math.random().toString(36).substring(2, 12);
 
-        // Create account
-        const res = await fetch("https://api.mail.tm/accounts", {
+        // Create account through serverless proxy
+        const accountResult = await apiRequest("/accounts", {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ address, password }),
         });
 
-        if (!res.ok) { showAlert("Failed to create temp email. Please try again."); return; }
+        if (!accountResult.response.ok) { showAlert("Failed to create temp email. Please try again."); return; }
 
-        account = { address, password };
+        account = { address };
         const emailDisplay = document.getElementById("emailDisplay");
         if (emailDisplay) emailDisplay.innerText = address;
 
-        localStorage.setItem("tm_account", JSON.stringify(account));
+        localStorage.setItem("tm_email", address);
 
-        // Login
-        const loginRes = await fetch("https://api.mail.tm/token", {
+        // Create secure server session (token is stored in HttpOnly cookie by function)
+        const sessionResult = await apiRequest("/session", {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ address, password }),
         });
 
-        if (!loginRes.ok) { showAlert("Account created but failed to login. Please try again."); return; }
-
-        const loginData = await loginRes.json();
-        token = loginData.token;
-        localStorage.setItem("tm_token", token);
+        if (!sessionResult.response.ok) {
+            showAlert("Account created but failed to start secure session. Please try again.");
+            return;
+        }
 
         // Start polling inbox
         if (inboxInterval) clearInterval(inboxInterval);
@@ -134,17 +167,23 @@ function markMessageAsRead(messageId) {
 }
 
 async function checkInbox() {
-    if (!token) return;
+    if (!account) return;
     const inbox = document.getElementById("inbox");
     if (!inbox) return;
 
     inbox.innerHTML = "<p>Loading...</p>";
 
     try {
-        const inboxRes = await fetch("https://api.mail.tm/messages", { headers: { Authorization: `Bearer ${token}` } });
-        if (!inboxRes.ok) { inbox.innerHTML = "<p>Failed to load inbox.</p>"; showAlert("Failed to load inbox"); return; }
+        const inboxResult = await apiRequest("/messages", { method: "GET" });
+        if (inboxResult.response.status === 401) {
+            resetSessionState(false);
+            inbox.innerHTML = "<p>Session expired. Generate a new email.</p>";
+            showAlert("Session expired. Please generate a new email.");
+            return;
+        }
+        if (!inboxResult.response.ok) { inbox.innerHTML = "<p>Failed to load inbox.</p>"; showAlert("Failed to load inbox"); return; }
 
-        const inboxData = await inboxRes.json();
+        const inboxData = inboxResult.data;
         const messages = inboxData["hydra:member"];
         inbox.innerHTML = "";
 
@@ -187,10 +226,10 @@ async function showMessage(id, div) {
     if (bodyDiv) { bodyDiv.remove(); return; }
 
     try {
-        const res = await fetch(`https://api.mail.tm/messages/${id}`, { headers: { Authorization: `Bearer ${token}` } });
-        if (!res.ok) throw new Error("Failed to fetch message");
+        const messageResult = await apiRequest(`/messages/${id}`, { method: "GET" });
+        if (!messageResult.response.ok) throw new Error("Failed to fetch message");
 
-        const data = await res.json();
+        const data = messageResult.data;
         const body = data.text || "No message content.";
 
         const newDiv = document.createElement("div");
@@ -211,9 +250,9 @@ async function showMessage(id, div) {
         const copyButton = document.createElement("button");
         copyButton.classList.add("message-copy");
         copyButton.innerHTML = '<i class="fas fa-copy"></i>';
-        copyButton.onclick = (e) => { 
-            e.stopPropagation(); 
-            navigator.clipboard.writeText(body).then(() => showAlert("Message content copied!")).catch(() => showAlert("Failed to copy")); 
+        copyButton.onclick = (e) => {
+            e.stopPropagation();
+            navigator.clipboard.writeText(body).then(() => showAlert("Message content copied!")).catch(() => showAlert("Failed to copy"));
         };
 
         controlsDiv.appendChild(copyButton);
@@ -230,9 +269,15 @@ async function showMessage(id, div) {
 }
 
 async function deleteAccount() {
-    if (!token || !account) { showAlert("No active email to delete"); return; }
+    if (!account) { showAlert("No active email to delete"); return; }
     const deleteIcon = document.querySelector(".action-button.delete i");
     if (deleteIcon) { deleteIcon.classList.remove("icon-animate-delete"); void deleteIcon.offsetWidth; deleteIcon.classList.add("icon-animate-delete"); }
+
+    try {
+        await apiRequest("/logout", { method: "POST" });
+    } catch (error) {
+        console.error("Logout error", error);
+    }
 
     const inbox = document.getElementById("inbox");
     if (inbox) inbox.innerHTML = "<p>No messages yet.</p>";
@@ -240,12 +285,7 @@ async function deleteAccount() {
     const emailDisplay = document.getElementById("emailDisplay");
     if (emailDisplay) emailDisplay.innerText = "---";
 
-    account = null; token = null;
-    localStorage.removeItem("tm_account");
-    localStorage.removeItem("tm_token");
-    localStorage.removeItem("tm_read_messages");
-
-    if (inboxInterval) { clearInterval(inboxInterval); inboxInterval = null; }
+    resetSessionState(false);
 
     showAlert("Email address deleted!");
 }
@@ -298,13 +338,11 @@ window.addEventListener("scroll", () => {
 function linkify(text) { return text.replace(/(https?:\/\/[^\s]+)/g, '<a href="$1" target="_blank" rel="noopener noreferrer">$1</a>'); }
 
 window.addEventListener("DOMContentLoaded", () => {
-    const savedAccount = localStorage.getItem("tm_account");
-    const savedToken = localStorage.getItem("tm_token");
-    if (savedAccount && savedToken) {
-        account = JSON.parse(savedAccount);
-        token = savedToken;
+    const savedEmail = localStorage.getItem("tm_email");
+    if (savedEmail) {
+        account = { address: savedEmail };
         const emailDisplay = document.getElementById("emailDisplay");
-        if (emailDisplay) emailDisplay.innerText = account.address;
+        if (emailDisplay) emailDisplay.innerText = savedEmail;
         checkInbox();
         inboxInterval = setInterval(checkInbox, 15000);
     }

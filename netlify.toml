@@ -1,0 +1,107 @@
+[build]
+  functions = "netlify/functions"
+
+[[redirects]]
+  from = "/api/tempmail/*"
+  to = "/.netlify/functions/tempmail/:splat"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "/blog/"
+  to = "/blog.html"
+  status = 200
+
+[[redirects]]
+  from = "/blog/what-is-temp-mail/"
+  to = "/blog1.html"
+  status = 200
+
+[[redirects]]
+  from = "/blog/avoid-spam-with-temp-mail/"
+  to = "/blog2.html"
+  status = 200
+
+[[redirects]]
+  from = "/blog/best-temp-mail-services/"
+  to = "/blog3.html"
+  status = 200
+
+[[redirects]]
+  from = "/blog/temp-mail-online-privacy/"
+  to = "/blog4.html"
+  status = 200
+
+[[redirects]]
+  from = "/blog/how-to-use-temp-mail-signups/"
+  to = "/blog5.html"
+  status = 200
+
+[[redirects]]
+  from = "/blog/temp-mail-facebook-instagram-verification/"
+  to = "/blog6.html"
+  status = 200
+
+[[redirects]]
+  from = "/blog/temp-mail-free-trials/"
+  to = "/blog7.html"
+  status = 200
+
+[[redirects]]
+  from = "/privacy/"
+  to = "/privacy.html"
+  status = 200
+
+[[redirects]]
+  from = "/blog.html"
+  to = "/blog/"
+  status = 301
+  force = true
+
+[[redirects]]
+  from = "/blog1.html"
+  to = "/blog/what-is-temp-mail/"
+  status = 301
+  force = true
+
+[[redirects]]
+  from = "/blog2.html"
+  to = "/blog/avoid-spam-with-temp-mail/"
+  status = 301
+  force = true
+
+[[redirects]]
+  from = "/blog3.html"
+  to = "/blog/best-temp-mail-services/"
+  status = 301
+  force = true
+
+[[redirects]]
+  from = "/blog4.html"
+  to = "/blog/temp-mail-online-privacy/"
+  status = 301
+  force = true
+
+[[redirects]]
+  from = "/blog5.html"
+  to = "/blog/how-to-use-temp-mail-signups/"
+  status = 301
+  force = true
+
+[[redirects]]
+  from = "/blog6.html"
+  to = "/blog/temp-mail-facebook-instagram-verification/"
+  status = 301
+  force = true
+
+[[redirects]]
+  from = "/blog7.html"
+  to = "/blog/temp-mail-free-trials/"
+  status = 301
+  force = true
+
+[[redirects]]
+  from = "/privacy.html"
+  to = "/privacy/"
+  status = 301
+  force = true

@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Privacy Policy | QuickTempBox</title>
+    <meta name="description"
+        content="Read the QuickTempBox privacy policy to understand how temporary emails are processed, retained, and deleted.">
+    <meta name="robots" content="index, follow">
+    <link rel="canonical" href="https://quicktempbox.netlify.app/privacy/">
+    <meta property="og:title" content="Privacy Policy | QuickTempBox">
+    <meta property="og:description" content="How QuickTempBox handles temporary email data, retention, and privacy.">
+    <meta property="og:url" content="https://quicktempbox.netlify.app/privacy/">
+    <meta property="og:type" content="website">
+    <meta property="og:image" content="https://quicktempbox.netlify.app/preview.png">
+    <meta name="twitter:card" content="summary_large_image">
+    <meta name="twitter:title" content="Privacy Policy | QuickTempBox">
+    <meta name="twitter:description" content="How QuickTempBox handles temporary email data, retention, and privacy.">
+    <meta name="twitter:image" content="https://quicktempbox.netlify.app/preview.png">
+    <link rel="icon" href="/favicon.png" type="image/png">
+    <link rel="stylesheet" href="style.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+</head>
+
+<body>
+    <header class="sticky-header">
+        <div class="header-container">
+            <div class="logo">
+                <i class="fas fa-envelope-open-text"></i> Temp Mail
+            </div>
+            <nav class="main-nav">
+                <ul>
+                    <li><a href="index.html">Home</a></li>
+                    <li><a href="blog.html">Blog</a></li>
+                    <li><a href="privacy.html" class="active">Privacy</a></li>
+                    <li><a href="index.html#contact">Contact</a></li>
+                </ul>
+            </nav>
+            <button class="mobile-menu-btn"><i class="fas fa-bars"></i></button>
+        </div>
+    </header>
+
+    <main class="container blog-post-container">
+        <article class="blog-post">
+            <h1>Privacy Policy</h1>
+            <p><strong>Effective Date:</strong> April 19, 2026</p>
+
+            <h2>Overview</h2>
+            <p>QuickTempBox provides temporary, disposable email addresses for short-term use. This policy explains what
+                data is handled and how long it is retained.</p>
+
+            <h2>Data We Process</h2>
+            <p>When you generate a temporary email address, inbox messages are retrieved from a third-party email
+                provider API to display them in your session.</p>
+            <ul>
+                <li>Temporary email address generated for your session</li>
+                <li>Incoming message metadata and content for viewing</li>
+                <li>Basic browser storage items needed for active session functionality</li>
+            </ul>
+
+            <h2>Data Retention</h2>
+            <p>QuickTempBox is built for temporary use. Email inboxes are short-lived and are not intended for long-term
+                storage.</p>
+            <ul>
+                <li>Temporary inbox data expires automatically by provider policy</li>
+                <li>Local session values can be removed by deleting the generated inbox or clearing browser data</li>
+                <li>No account registration is required for core usage</li>
+            </ul>
+
+            <h2>No Permanent Mail Logs</h2>
+            <p>QuickTempBox does not maintain a permanent, user-identity based mail archive for this disposable service.
+                Do not use temporary inboxes for sensitive or long-term communications.</p>
+
+            <h2>Third-Party Services</h2>
+            <p>This project uses external services such as analytics providers and disposable email APIs. Their own
+                privacy policies and retention practices may apply.</p>
+
+            <h2>Security Notice</h2>
+            <p>Use temporary email only for low-risk tasks such as signups or trial verifications. Never use disposable
+                inboxes for banking, legal, healthcare, or critical account recovery workflows.</p>
+
+            <h2>Contact</h2>
+            <p>For privacy questions, contact the project maintainer using the contact links available on the homepage.
+            </p>
+
+            <p><a href="index.html">Home</a> | <a href="blog.html">Blog</a></p>
+        </article>
+    </main>
+
+    <footer class="site-footer">
+        <div class="footer-container">
+            <p>&copy; <span id="currentYear"></span> Temp Mail Generator. All Rights Reserved.</p>
+            <p><a href="privacy.html">Privacy Policy</a></p>
+        </div>
+    </footer>
+
+    <script src="script.js"></script>
+    <script>
+        const yearNode = document.getElementById("currentYear");
+        if (yearNode) yearNode.textContent = new Date().getFullYear();
+    </script>
+</body>
+
+</html>
