@@ -1,319 +1,571 @@
-const DOMAIN = "outlook.dpdns.org";
+const DEFAULT_BASE_URL = "https://api.mail.tm";
 
-function jsonResponse(status, data, headers = {}) {
-    return new Response(JSON.stringify(data), {
-        status,
-        headers: {
-            "Content-Type": "application/json; charset=utf-8",
-            "Cache-Control": "no-store",
-            ...headers,
-        },
-    });
+function getBaseUrl() {
+    return (
+        process.env.MAILTM_BASE_URL ||
+        DEFAULT_BASE_URL
+    ).replace(/\/$/, "");
 }
 
-function getRoute(request) {
-    const url = new URL(request.url);
-    const prefix = "/api/tempmail";
+function parseCookies(cookieHeader = "") {
+    return cookieHeader
+        .split(";")
+        .map((part) => part.trim())
+        .filter(Boolean)
+        .reduce((cookies, part) => {
+            const index = part.indexOf("=");
 
-    if (url.pathname.startsWith(prefix)) {
-        return url.pathname.slice(prefix.length) || "/";
+            if (index === -1) {
+                return cookies;
+            }
+
+            const key = part
+                .slice(0, index)
+                .trim();
+
+            const value = part
+                .slice(index + 1)
+                .trim();
+
+            try {
+                cookies[key] =
+                    decodeURIComponent(value);
+            } catch {
+                cookies[key] = value;
+            }
+
+            return cookies;
+        }, {});
+}
+
+function getRoutePath(rawPath = "") {
+    const apiPrefix = "/api/tempmail";
+    const functionPrefix =
+        "/.netlify/functions/tempmail";
+
+    if (rawPath.startsWith(apiPrefix)) {
+        return (
+            rawPath.slice(apiPrefix.length) ||
+            "/"
+        );
+    }
+
+    if (rawPath.startsWith(functionPrefix)) {
+        return (
+            rawPath.slice(functionPrefix.length) ||
+            "/"
+        );
     }
 
     return "/";
 }
 
-function randomUsername() {
-    return Math.random()
-        .toString(36)
-        .substring(2, 10)
-        .toLowerCase();
+function jsonResponse(
+    statusCode,
+    payload,
+    headers = {}
+) {
+    return {
+        status: statusCode,
+        headers: {
+            "Content-Type":
+                "application/json; charset=utf-8",
+
+            "Cache-Control":
+                "no-store, no-cache, must-revalidate",
+
+            ...headers,
+        },
+
+        body: JSON.stringify(
+            payload ?? {}
+        ),
+    };
 }
 
-function getCookie(request, name) {
-    const cookie = request.headers.get("Cookie") || "";
+function buildSessionCookie(token) {
+    const name =
+        process.env.TM_SESSION_COOKIE_NAME ||
+        "tm_session";
 
-    const match = cookie
-        .split(";")
-        .map(v => v.trim())
-        .find(v => v.startsWith(`${name}=`));
+    const maxAge = Number(
+        process.env.TM_SESSION_MAX_AGE ||
+        3600
+    );
 
-    return match ? decodeURIComponent(match.slice(name.length + 1)) : null;
+    return [
+        `${name}=${encodeURIComponent(token)}`,
+        "Path=/",
+        `Max-Age=${maxAge}`,
+        "HttpOnly",
+        "Secure",
+        "SameSite=Lax",
+    ].join("; ");
 }
 
-function sessionCookie(address) {
-    return `tm_email=${encodeURIComponent(address)}; Path=/; Max-Age=86400; HttpOnly; Secure; SameSite=Lax`;
+function clearSessionCookie() {
+    const name =
+        process.env.TM_SESSION_COOKIE_NAME ||
+        "tm_session";
+
+    return [
+        `${name}=`,
+        "Path=/",
+        "Max-Age=0",
+        "HttpOnly",
+        "Secure",
+        "SameSite=Lax",
+    ].join("; ");
 }
 
-function clearCookie() {
-    return "tm_email=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Lax";
+function readSessionToken(
+    cookieHeader = ""
+) {
+    const name =
+        process.env.TM_SESSION_COOKIE_NAME ||
+        "tm_session";
+
+    const cookies =
+        parseCookies(cookieHeader);
+
+    return cookies[name] || null;
+}
+
+async function upstreamJson(
+    url,
+    options = {}
+) {
+    const response = await fetch(
+        url,
+        options
+    );
+
+    const text =
+        await response.text();
+
+    let data = null;
+
+    try {
+        data = text
+            ? JSON.parse(text)
+            : null;
+    } catch {
+        data = {
+            message:
+                text ||
+                "Unexpected upstream response",
+        };
+    }
+
+    return {
+        ok: response.ok,
+        status: response.status,
+        data,
+    };
+}
+
+function getCookieHeader(event) {
+    return (
+        event.headers?.cookie ||
+        event.headers?.Cookie ||
+        ""
+    );
+}
+
+function getRequestBody(event) {
+    if (!event.body) {
+        return {};
+    }
+
+    try {
+        return JSON.parse(event.body);
+    } catch {
+        return {};
+    }
 }
 
 export async function onRequest(context) {
-    const { request, env } = context;
+    const request =
+        context.request;
+
+    const env =
+        context.env || {};
+
+    const url =
+        new URL(request.url);
+
+    const method =
+        request.method.toUpperCase();
+
+    const route =
+        getRoutePath(url.pathname);
+
+    const baseUrl =
+        (
+            env.MAILTM_BASE_URL ||
+            DEFAULT_BASE_URL
+        ).replace(/\/$/, "");
+
+    /*
+     * CORS / preflight.
+     */
+    if (method === "OPTIONS") {
+        return new Response(
+            null,
+            {
+                status: 204,
+                headers: {
+                    "Allow":
+                        "GET, POST, OPTIONS",
+                },
+            }
+        );
+    }
 
     try {
-        const method = request.method;
-        const route = getRoute(request);
-
         /*
          * GET /domains
+         *
+         * This is only used as an API test.
+         * The frontend uses CUSTOM_DOMAIN directly.
          */
-        if (method === "GET" && route === "/domains") {
-            return jsonResponse(200, {
-                "@type": "Domain",
-                domain: DOMAIN,
-                isActive: true,
-            });
+        if (
+            method === "GET" &&
+            route === "/domains"
+        ) {
+            const upstream =
+                await upstreamJson(
+                    `${baseUrl}/domains`
+                );
+
+            return new Response(
+                JSON.stringify(
+                    upstream.data || {}
+                ),
+                {
+                    status:
+                        upstream.status,
+                    headers: {
+                        "Content-Type":
+                            "application/json; charset=utf-8",
+                        "Cache-Control":
+                            "no-store",
+                    },
+                }
+            );
         }
 
         /*
          * POST /accounts
-         *
-         * 前端传 address/password。
-         * 我们不再调用 Mail.tm，
-         * 而是直接把邮箱保存到 D1。
          */
-        if (method === "POST" && route === "/accounts") {
-            const payload = await request.json().catch(() => ({}));
-
-            const address = String(payload.address || "")
-                .trim()
-                .toLowerCase();
-
-            if (!address.endsWith(`@${DOMAIN}`)) {
-                return jsonResponse(400, {
-                    message: "Invalid email domain",
+        if (
+            method === "POST" &&
+            route === "/accounts"
+        ) {
+            const payload =
+                getRequestBody({
+                    body:
+                        await request
+                            .clone()
+                            .text(),
                 });
-            }
 
-            const existing = await env.DB
-                .prepare(`
-                    SELECT address
-                    FROM mailboxes
-                    WHERE lower(address) = ?
-                    LIMIT 1
-                `)
-                .bind(address)
-                .first();
+            const upstream =
+                await upstreamJson(
+                    `${baseUrl}/accounts`,
+                    {
+                        method: "POST",
+                        headers: {
+                            "Content-Type":
+                                "application/json",
+                        },
+                        body:
+                            JSON.stringify(
+                                payload
+                            ),
+                    }
+                );
 
-            if (existing) {
-                return jsonResponse(409, {
-                    message: "Mailbox already exists",
-                });
-            }
-
-            await env.DB
-                .prepare(`
-                    INSERT INTO mailboxes
-                    (address, created_at)
-                    VALUES (?, ?)
-                `)
-                .bind(address, Date.now())
-                .run();
-
-            return jsonResponse(201, {
-                address,
-            });
+            return new Response(
+                JSON.stringify(
+                    upstream.data || {}
+                ),
+                {
+                    status:
+                        upstream.status,
+                    headers: {
+                        "Content-Type":
+                            "application/json; charset=utf-8",
+                        "Cache-Control":
+                            "no-store",
+                    },
+                }
+            );
         }
 
         /*
          * POST /session
          *
-         * 现在不需要 Mail.tm token。
-         * 用 HttpOnly cookie 保存当前邮箱。
+         * Login to Mail.tm and store
+         * the returned token in an
+         * HttpOnly cookie.
          */
-        if (method === "POST" && route === "/session") {
-            const payload = await request.json().catch(() => ({}));
+        if (
+            method === "POST" &&
+            route === "/session"
+        ) {
+            const text =
+                await request.text();
 
-            const address = String(payload.address || "")
-                .trim()
-                .toLowerCase();
+            let payload = {};
 
-            if (!address.endsWith(`@${DOMAIN}`)) {
-                return jsonResponse(400, {
-                    message: "Invalid email",
-                });
+            try {
+                payload = text
+                    ? JSON.parse(text)
+                    : {};
+            } catch {
+                payload = {};
             }
 
-            const mailbox = await env.DB
-                .prepare(`
-                    SELECT address
-                    FROM mailboxes
-                    WHERE lower(address) = ?
-                    LIMIT 1
-                `)
-                .bind(address)
-                .first();
+            const upstream =
+                await upstreamJson(
+                    `${baseUrl}/token`,
+                    {
+                        method: "POST",
+                        headers: {
+                            "Content-Type":
+                                "application/json",
+                        },
+                        body:
+                            JSON.stringify(
+                                payload
+                            ),
+                    }
+                );
 
-            if (!mailbox) {
-                return jsonResponse(401, {
-                    message: "Mailbox does not exist",
-                });
+            if (
+                !upstream.ok ||
+                !upstream.data ||
+                !upstream.data.token
+            ) {
+                return new Response(
+                    JSON.stringify(
+                        upstream.data || {
+                            message:
+                                "Failed to create session",
+                        }
+                    ),
+                    {
+                        status:
+                            upstream.status ||
+                            500,
+                        headers: {
+                            "Content-Type":
+                                "application/json; charset=utf-8",
+                            "Cache-Control":
+                                "no-store",
+                        },
+                    }
+                );
             }
 
-            return jsonResponse(
-                200,
-                { ok: true },
+            return new Response(
+                JSON.stringify({
+                    ok: true,
+                }),
                 {
-                    "Set-Cookie": sessionCookie(address),
+                    status: 200,
+                    headers: {
+                        "Content-Type":
+                            "application/json; charset=utf-8",
+
+                        "Cache-Control":
+                            "no-store",
+
+                        "Set-Cookie":
+                            buildSessionCookie(
+                                upstream.data.token
+                            ),
+                    },
+                }
+            );
+        }
+
+        /*
+         * POST /logout
+         */
+        if (
+            method === "POST" &&
+            route === "/logout"
+        ) {
+            return new Response(
+                JSON.stringify({
+                    ok: true,
+                }),
+                {
+                    status: 200,
+                    headers: {
+                        "Content-Type":
+                            "application/json; charset=utf-8",
+
+                        "Cache-Control":
+                            "no-store",
+
+                        "Set-Cookie":
+                            clearSessionCookie(),
+                    },
                 }
             );
         }
 
         /*
          * GET /messages
-         */
-        if (method === "GET" && route === "/messages") {
-            const address = getCookie(request, "tm_email");
-
-            if (!address) {
-                return jsonResponse(401, {
-                    message: "Not authenticated",
-                });
-            }
-
-            const mailbox = await env.DB
-                .prepare(`
-                    SELECT address
-                    FROM mailboxes
-                    WHERE lower(address) = ?
-                    LIMIT 1
-                `)
-                .bind(address.toLowerCase())
-                .first();
-
-            if (!mailbox) {
-                return jsonResponse(401, {
-                    message: "Mailbox does not exist",
-                });
-            }
-
-            const result = await env.DB
-                .prepare(`
-                    SELECT
-                        id,
-                        message_id,
-                        sender,
-                        recipient,
-                        subject,
-                        body_text,
-                        received_at
-                    FROM messages
-                    WHERE lower(mailbox_address) = ?
-                    ORDER BY received_at DESC
-                    LIMIT 100
-                `)
-                .bind(address.toLowerCase())
-                .all();
-
-            const messages = (result.results || []).map(row => ({
-                id: String(row.id),
-                from: {
-                    address: row.sender || "",
-                },
-                to: [
-                    {
-                        address: row.recipient || "",
-                    }
-                ],
-                subject: row.subject || "",
-                intro: String(row.body_text || "")
-                    .replace(/\s+/g, " ")
-                    .substring(0, 180),
-                createdAt: new Date(row.received_at).toISOString(),
-                seen: false,
-                hasAttachments: false,
-            }));
-
-            return jsonResponse(200, {
-                "hydra:member": messages,
-                "hydra:totalItems": messages.length,
-            });
-        }
-
-        /*
          * GET /messages/:id
          */
         if (
             method === "GET" &&
-            route.startsWith("/messages/")
-        ) {
-            const id = route.substring("/messages/".length);
-
-            const address = getCookie(request, "tm_email");
-
-            if (!address) {
-                return jsonResponse(401, {
-                    message: "Not authenticated",
-                });
-            }
-
-            const row = await env.DB
-                .prepare(`
-                    SELECT
-                        id,
-                        sender,
-                        recipient,
-                        subject,
-                        body_text,
-                        body_html,
-                        received_at
-                    FROM messages
-                    WHERE id = ?
-                    AND lower(mailbox_address) = ?
-                    LIMIT 1
-                `)
-                .bind(
-                    Number(id),
-                    address.toLowerCase()
+            (
+                route === "/messages" ||
+                route.startsWith(
+                    "/messages/"
                 )
-                .first();
+            )
+        ) {
+            const cookieHeader =
+                getCookieHeader(
+                    context
+                );
 
-            if (!row) {
-                return jsonResponse(404, {
-                    message: "Message not found",
-                });
+            const token =
+                readSessionToken(
+                    cookieHeader
+                );
+
+            if (!token) {
+                return new Response(
+                    JSON.stringify({
+                        message:
+                            "Not authenticated",
+                    }),
+                    {
+                        status: 401,
+                        headers: {
+                            "Content-Type":
+                                "application/json; charset=utf-8",
+                            "Cache-Control":
+                                "no-store",
+                        },
+                    }
+                );
             }
 
-            return jsonResponse(200, {
-                id: String(row.id),
-                from: {
-                    address: row.sender || "",
-                },
-                to: [
+            /*
+             * IMPORTANT:
+             *
+             * Keep the exact message path,
+             * including /messages/4.
+             */
+            const upstream =
+                await upstreamJson(
+                    `${baseUrl}${route}`,
                     {
-                        address: row.recipient || "",
+                        method: "GET",
+                        headers: {
+                            "Authorization":
+                                `Bearer ${token}`,
+                            "Accept":
+                                "application/json",
+                        },
                     }
-                ],
-                subject: row.subject || "",
-                text: row.body_text || "",
-                html: row.body_html || "",
-                createdAt: new Date(row.received_at).toISOString(),
-            });
-        }
+                );
 
-        /*
-         * POST /logout
-         */
-        if (method === "POST" && route === "/logout") {
-            return jsonResponse(
-                200,
-                { ok: true },
+            /*
+             * Mail.tm session expired.
+             */
+            if (
+                upstream.status === 401
+            ) {
+                return new Response(
+                    JSON.stringify({
+                        message:
+                            "Session expired",
+                    }),
+                    {
+                        status: 401,
+                        headers: {
+                            "Content-Type":
+                                "application/json; charset=utf-8",
+
+                            "Cache-Control":
+                                "no-store",
+
+                            "Set-Cookie":
+                                clearSessionCookie(),
+                        },
+                    }
+                );
+            }
+
+            /*
+             * Return the COMPLETE Mail.tm
+             * response unchanged.
+             *
+             * This is important because
+             * /messages/:id can contain
+             * text/html/text fields.
+             */
+            return new Response(
+                JSON.stringify(
+                    upstream.data || {}
+                ),
                 {
-                    "Set-Cookie": clearCookie(),
+                    status:
+                        upstream.status,
+
+                    headers: {
+                        "Content-Type":
+                            "application/json; charset=utf-8",
+
+                        "Cache-Control":
+                            "no-store",
+                    },
                 }
             );
         }
 
-        return jsonResponse(404, {
-            message: "Route not found",
-        });
-
+        return new Response(
+            JSON.stringify({
+                message:
+                    "Route not found",
+                route,
+                method,
+            }),
+            {
+                status: 404,
+                headers: {
+                    "Content-Type":
+                        "application/json; charset=utf-8",
+                },
+            }
+        );
     } catch (error) {
-        console.error("QuickTempBox API error:", error);
+        console.error(
+            "tempmail function error:",
+            error
+        );
 
-        return jsonResponse(500, {
-            message: "Internal server error",
-        });
+        return new Response(
+            JSON.stringify({
+                message:
+                    "Internal server error",
+            }),
+            {
+                status: 500,
+                headers: {
+                    "Content-Type":
+                        "application/json; charset=utf-8",
+                },
+            }
+        );
     }
 }
