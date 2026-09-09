@@ -21,10 +21,7 @@ async function apiRequest(path, options = {}) {
         data = null;
     }
 
-    return {
-        response,
-        data,
-    };
+    return { response, data };
 }
 
 function resetSessionState(clearEmailDisplay = true) {
@@ -47,53 +44,65 @@ function resetSessionState(clearEmailDisplay = true) {
     }
 }
 
+/**
+ * Generate temporary email account
+ */
 async function generateAccount() {
     try {
         const username = Math.random()
             .toString(36)
-            .substring(2, 10)
-            .toLowerCase();
+            .substring(2, 10);
 
-        // 获取 Cloudflare 自定义域名
         const domainsResult = await apiRequest("/domains", {
             method: "GET",
         });
 
         if (!domainsResult.response.ok) {
-            showAlert("Failed to fetch email domain. Please try again.");
+            showAlert("Failed to fetch email domains. Please try again.");
             return;
         }
 
-        const domain = domainsResult.data?.domain;
+        const domainData = domainsResult.data;
 
-        if (!domain) {
-            showAlert("Email domain unavailable. Please try again later.");
+        if (
+            !domainData ||
+            !Array.isArray(domainData["hydra:member"]) ||
+            domainData["hydra:member"].length === 0
+        ) {
+            showAlert("No email domains available. Please try again later.");
             return;
         }
+
+        /*
+         * Your Mail.tm API currently reports
+         * outlook.dpdns.org as an active domain.
+         */
+        const domain = "outlook.dpdns.org";
 
         const address = `${username}@${domain}`;
 
-        // 在 D1 创建邮箱
+        const password = Math.random()
+            .toString(36)
+            .substring(2, 12);
+
         const accountResult = await apiRequest("/accounts", {
             method: "POST",
             body: JSON.stringify({
-                address: address,
+                address,
+                password,
             }),
         });
 
         if (!accountResult.response.ok) {
-            let message = "Failed to create temp email. Please try again.";
+            console.error("Account creation failed:", accountResult.data);
 
-            if (accountResult.data?.message) {
-                message = accountResult.data.message;
-            }
-
-            showAlert(message);
+            showAlert("Failed to create temp email. Please try again.");
             return;
         }
 
         account = {
-            address: address,
+            address,
+            password,
         };
 
         const emailDisplay = document.getElementById("emailDisplay");
@@ -104,33 +113,39 @@ async function generateAccount() {
 
         localStorage.setItem("tm_email", address);
 
-        // 创建当前邮箱 Session
+        /*
+         * Create secure server session.
+         * The token is stored in an HttpOnly cookie
+         * by the Cloudflare/Netlify function.
+         */
         const sessionResult = await apiRequest("/session", {
             method: "POST",
             body: JSON.stringify({
-                address: address,
+                address,
+                password,
             }),
         });
 
         if (!sessionResult.response.ok) {
+            console.error("Session creation failed:", sessionResult.data);
+
             showAlert(
-                "Account created but failed to start session. Please try again."
+                "Account created but failed to start secure session. Please try again."
             );
+
             return;
         }
 
-        // 启动收件箱轮询
         if (inboxInterval) {
             clearInterval(inboxInterval);
         }
 
         await checkInbox();
 
-        inboxInterval = setInterval(() => {
-            checkInbox();
-        }, 15000);
+        inboxInterval = setInterval(checkInbox, 15000);
 
         showAlert("Email account created successfully!");
+
     } catch (error) {
         console.error("generateAccount error:", error);
 
@@ -138,6 +153,9 @@ async function generateAccount() {
     }
 }
 
+/**
+ * Alert
+ */
 function showAlert(message) {
     const alert = document.getElementById("alert");
     const alertMessage = document.getElementById("alertMessage");
@@ -163,6 +181,9 @@ function closeAlert() {
     }
 }
 
+/**
+ * Copy email
+ */
 function copyEmail() {
     const email = document
         .getElementById("emailDisplay")
@@ -193,18 +214,9 @@ function copyEmail() {
         });
 }
 
-function triggerSpin(icon) {
-    if (!icon) {
-        return;
-    }
-
-    icon.classList.remove("animate-spin");
-
-    void icon.offsetWidth;
-
-    icon.classList.add("animate-spin");
-}
-
+/**
+ * Refresh icon
+ */
 const emailIcon = document.getElementById("emailRefreshIcon");
 
 if (emailIcon) {
@@ -221,6 +233,21 @@ if (inboxIcon) {
     });
 }
 
+function triggerSpin(icon) {
+    if (!icon) {
+        return;
+    }
+
+    icon.classList.remove("animate-spin");
+
+    void icon.offsetWidth;
+
+    icon.classList.add("animate-spin");
+}
+
+/**
+ * Refresh inbox
+ */
 function refreshInbox() {
     const icon = document.getElementById("inboxRefreshIcon");
 
@@ -241,15 +268,14 @@ function refreshInbox() {
     });
 }
 
+/**
+ * Read message tracking
+ */
 function getReadMessages() {
-    const stored = localStorage.getItem("tm_read_messages");
-
-    if (!stored) {
-        return [];
-    }
-
     try {
-        return JSON.parse(stored);
+        const stored = localStorage.getItem("tm_read_messages");
+
+        return stored ? JSON.parse(stored) : [];
     } catch {
         return [];
     }
@@ -268,6 +294,72 @@ function markMessageAsRead(messageId) {
     }
 }
 
+/**
+ * Escape HTML
+ *
+ * This prevents email content from injecting scripts
+ * into your website.
+ */
+function escapeHtml(value) {
+    if (value === null || value === undefined) {
+        return "";
+    }
+
+    return String(value)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#039;");
+}
+
+/**
+ * Convert URLs to clickable links
+ */
+function linkify(text) {
+    const escaped = escapeHtml(text);
+
+    return escaped.replace(
+        /(https?:\/\/[^\s<]+)/g,
+        '<a href="$1" target="_blank" rel="noopener noreferrer">$1</a>'
+    );
+}
+
+/**
+ * Get readable message preview
+ */
+function getMessagePreview(message) {
+    if (!message) {
+        return "";
+    }
+
+    if (message.intro) {
+        return message.intro;
+    }
+
+    if (message.text) {
+        return String(message.text)
+            .replace(/\s+/g, " ")
+            .trim()
+            .substring(0, 200);
+    }
+
+    if (message.html) {
+        return String(message.html)
+            .replace(/<style[\s\S]*?<\/style>/gi, "")
+            .replace(/<script[\s\S]*?<\/script>/gi, "")
+            .replace(/<[^>]+>/g, " ")
+            .replace(/\s+/g, " ")
+            .trim()
+            .substring(0, 200);
+    }
+
+    return "";
+}
+
+/**
+ * Load inbox
+ */
 async function checkInbox() {
     if (!account) {
         return;
@@ -278,6 +370,8 @@ async function checkInbox() {
     if (!inbox) {
         return;
     }
+
+    inbox.innerHTML = "<p>Loading...</p>";
 
     try {
         const inboxResult = await apiRequest("/messages", {
@@ -298,6 +392,11 @@ async function checkInbox() {
         }
 
         if (!inboxResult.response.ok) {
+            console.error(
+                "Inbox request failed:",
+                inboxResult.data
+            );
+
             inbox.innerHTML =
                 "<p>Failed to load inbox.</p>";
 
@@ -306,10 +405,10 @@ async function checkInbox() {
             return;
         }
 
-        const inboxData = inboxResult.data || {};
+        const inboxData = inboxResult.data;
 
         const messages = Array.isArray(
-            inboxData["hydra:member"]
+            inboxData?.["hydra:member"]
         )
             ? inboxData["hydra:member"]
             : [];
@@ -328,54 +427,53 @@ async function checkInbox() {
                 ? new Date(msg.createdAt).toLocaleString()
                 : "";
 
-            const messageDiv =
-                document.createElement("div");
+            const messageDiv = document.createElement("div");
 
             messageDiv.classList.add("message");
 
             const isRead =
                 msg.seen ||
-                readMessages.includes(String(msg.id));
+                readMessages.includes(msg.id);
 
             messageDiv.classList.add(
                 isRead ? "read" : "unread"
             );
 
-            messageDiv.dataset.messageId =
-                String(msg.id);
+            messageDiv.dataset.messageId = msg.id;
 
-            const header =
-                document.createElement("div");
+            const header = document.createElement("div");
 
             header.classList.add("message-header");
 
-            const from =
-                msg.from?.address || "Unknown";
+            const fromAddress =
+                msg.from?.address ||
+                msg.from?.name ||
+                "Unknown sender";
 
             const subject =
-                msg.subject || "(No subject)";
+                msg.subject ||
+                "(No subject)";
 
-            const intro =
-                msg.intro || "";
+            const preview =
+                getMessagePreview(msg) ||
+                "(No preview available)";
 
             header.innerHTML = `
-                <strong>From:</strong> ${escapeHtml(from)}<br>
+                <strong>From:</strong> ${escapeHtml(fromAddress)}<br>
                 <strong>Subject:</strong> ${escapeHtml(subject)}<br>
                 <strong>Time:</strong> ${escapeHtml(receivedDate)}<br>
-                <strong>Preview:</strong> ${escapeHtml(intro)}
+                <strong>Preview:</strong> ${escapeHtml(preview)}
             `;
 
             messageDiv.appendChild(header);
 
             messageDiv.onclick = () => {
-                showMessage(
-                    String(msg.id),
-                    messageDiv
-                );
+                showMessage(msg.id, messageDiv);
             };
 
             inbox.appendChild(messageDiv);
         }
+
     } catch (error) {
         console.error("checkInbox error:", error);
 
@@ -386,6 +484,9 @@ async function checkInbox() {
     }
 }
 
+/**
+ * Display full email
+ */
 async function showMessage(id, div) {
     if (!div) {
         return;
@@ -396,32 +497,57 @@ async function showMessage(id, div) {
 
     markMessageAsRead(id);
 
-    let bodyDiv =
+    const existingBody =
         div.querySelector(".message-body");
 
-    if (bodyDiv) {
-        bodyDiv.remove();
+    if (existingBody) {
+        existingBody.remove();
         return;
     }
 
     try {
-        const messageResult =
-            await apiRequest(`/messages/${encodeURIComponent(id)}`, {
+        const messageResult = await apiRequest(
+            `/messages/${encodeURIComponent(id)}`,
+            {
                 method: "GET",
-            });
+            }
+        );
 
         if (!messageResult.response.ok) {
+            console.error(
+                "Message request failed:",
+                messageResult.data
+            );
+
             throw new Error(
                 "Failed to fetch message"
             );
         }
 
-        const data = messageResult.data || {};
+        const data = messageResult.data;
 
-        const body =
-            data.text ||
-            data.body_text ||
-            "No message content.";
+        console.log(
+            "Full Mail.tm message:",
+            data
+        );
+
+        /*
+         * Mail.tm may provide:
+         *
+         * data.text
+         * data.html
+         *
+         * Different emails may contain one or both.
+         */
+        const textBody =
+            typeof data?.text === "string"
+                ? data.text.trim()
+                : "";
+
+        const htmlBody =
+            typeof data?.html === "string"
+                ? data.html.trim()
+                : "";
 
         const newDiv =
             document.createElement("div");
@@ -435,8 +561,84 @@ async function showMessage(id, div) {
             "message-content"
         );
 
-        contentDiv.innerHTML =
-            linkify(body);
+        /*
+         * Prefer plain text because it is safer
+         * and easier to display correctly.
+         *
+         * If plain text is unavailable, use the HTML
+         * version after sanitizing it.
+         */
+        if (textBody) {
+            contentDiv.innerHTML =
+                linkify(textBody)
+                    .replace(/\n/g, "<br>");
+        } else if (htmlBody) {
+            /*
+             * Remove dangerous elements and attributes.
+             * This is a basic client-side sanitizer.
+             */
+            const parser =
+                new DOMParser();
+
+            const parsed =
+                parser.parseFromString(
+                    htmlBody,
+                    "text/html"
+                );
+
+            parsed
+                .querySelectorAll(
+                    "script, iframe, object, embed, form, base, meta, link"
+                )
+                .forEach((el) => el.remove());
+
+            parsed
+                .querySelectorAll("*")
+                .forEach((el) => {
+                    [...el.attributes].forEach(
+                        (attr) => {
+                            const name =
+                                attr.name.toLowerCase();
+
+                            const value =
+                                attr.value.trim();
+
+                            if (
+                                name.startsWith("on") ||
+                                name === "srcdoc"
+                            ) {
+                                el.removeAttribute(
+                                    attr.name
+                                );
+                            }
+
+                            if (
+                                (name === "href" ||
+                                    name === "src") &&
+                                value
+                                    .toLowerCase()
+                                    .startsWith(
+                                        "javascript:"
+                                    )
+                            ) {
+                                el.removeAttribute(
+                                    attr.name
+                                );
+                            }
+                        }
+                    );
+                });
+
+            contentDiv.innerHTML =
+                parsed.body.innerHTML;
+        } else if (data?.intro) {
+            contentDiv.innerHTML =
+                linkify(String(data.intro))
+                    .replace(/\n/g, "<br>");
+        } else {
+            contentDiv.innerHTML =
+                "<p>No message content.</p>";
+        }
 
         const controlsDiv =
             document.createElement("div");
@@ -445,21 +647,9 @@ async function showMessage(id, div) {
             "message-controls"
         );
 
-        const closeButton =
-            document.createElement("button");
-
-        closeButton.classList.add(
-            "message-close"
-        );
-
-        closeButton.innerHTML =
-            '<i class="fas fa-times"></i>';
-
-        closeButton.onclick = (event) => {
-            event.stopPropagation();
-            newDiv.remove();
-        };
-
+        /*
+         * Copy button
+         */
         const copyButton =
             document.createElement("button");
 
@@ -467,14 +657,27 @@ async function showMessage(id, div) {
             "message-copy"
         );
 
+        copyButton.title =
+            "Copy message";
+
         copyButton.innerHTML =
             '<i class="fas fa-copy"></i>';
 
-        copyButton.onclick = (event) => {
-            event.stopPropagation();
+        copyButton.onclick = (e) => {
+            e.stopPropagation();
+
+            const copyText =
+                textBody ||
+                data?.intro ||
+                htmlBody.replace(
+                    /<[^>]+>/g,
+                    " "
+                );
 
             navigator.clipboard
-                .writeText(body)
+                .writeText(
+                    String(copyText)
+                )
                 .then(() => {
                     showAlert(
                         "Message content copied!"
@@ -487,19 +690,55 @@ async function showMessage(id, div) {
                 });
         };
 
-        controlsDiv.appendChild(copyButton);
-        controlsDiv.appendChild(closeButton);
+        /*
+         * Close button
+         */
+        const closeButton =
+            document.createElement("button");
 
-        newDiv.appendChild(contentDiv);
-        newDiv.appendChild(controlsDiv);
+        closeButton.classList.add(
+            "message-close"
+        );
 
-        newDiv.onclick = (event) => {
-            event.stopPropagation();
+        closeButton.title =
+            "Close message";
+
+        closeButton.innerHTML =
+            '<i class="fas fa-times"></i>';
+
+        closeButton.onclick = (e) => {
+            e.stopPropagation();
+
+            newDiv.remove();
+        };
+
+        controlsDiv.appendChild(
+            copyButton
+        );
+
+        controlsDiv.appendChild(
+            closeButton
+        );
+
+        newDiv.appendChild(
+            contentDiv
+        );
+
+        newDiv.appendChild(
+            controlsDiv
+        );
+
+        newDiv.onclick = (e) => {
+            e.stopPropagation();
         };
 
         div.appendChild(newDiv);
+
     } catch (error) {
-        console.error("showMessage error:", error);
+        console.error(
+            "showMessage error:",
+            error
+        );
 
         showAlert(
             "Failed to load message content"
@@ -507,9 +746,15 @@ async function showMessage(id, div) {
     }
 }
 
+/**
+ * Delete / logout current account
+ */
 async function deleteAccount() {
     if (!account) {
-        showAlert("No active email to delete");
+        showAlert(
+            "No active email to delete"
+        );
+
         return;
     }
 
@@ -560,36 +805,27 @@ async function deleteAccount() {
 
     resetSessionState(false);
 
-    showAlert("Email address deleted!");
-}
-
-function escapeHtml(value) {
-    return String(value)
-        .replace(/&/g, "&amp;")
-        .replace(/</g, "&lt;")
-        .replace(/>/g, "&gt;")
-        .replace(/"/g, "&quot;")
-        .replace(/'/g, "&#039;");
-}
-
-function linkify(text) {
-    const safeText = escapeHtml(text);
-
-    return safeText.replace(
-        /(https?:\/\/[^\s]+)/g,
-        '<a href="$1" target="_blank" rel="noopener noreferrer">$1</a>'
+    showAlert(
+        "Email address deleted!"
     );
 }
 
+/**
+ * Current year
+ */
 const yearEl =
-    document.getElementById("currentYear");
+    document.getElementById(
+        "currentYear"
+    );
 
 if (yearEl) {
     yearEl.textContent =
         new Date().getFullYear();
 }
 
-// Mobile menu
+/**
+ * Mobile menu
+ */
 const mobileMenuBtn =
     document.querySelector(
         ".mobile-menu-btn"
@@ -600,7 +836,10 @@ const mainNav =
         ".main-nav"
     );
 
-if (mobileMenuBtn && mainNav) {
+if (
+    mobileMenuBtn &&
+    mainNav
+) {
     mobileMenuBtn.addEventListener(
         "click",
         () => {
@@ -611,9 +850,13 @@ if (mobileMenuBtn && mainNav) {
     );
 }
 
-// Close mobile menu
+/**
+ * Close mobile menu
+ */
 document
-    .querySelectorAll(".main-nav a")
+    .querySelectorAll(
+        ".main-nav a"
+    )
     .forEach((link) => {
         link.addEventListener(
             "click",
@@ -625,14 +868,18 @@ document
         );
     });
 
-// Smooth scrolling
+/**
+ * Smooth scrolling
+ */
 document
-    .querySelectorAll('a[href^="#"]')
+    .querySelectorAll(
+        'a[href^="#"]'
+    )
     .forEach((anchor) => {
         anchor.addEventListener(
             "click",
-            function (event) {
-                event.preventDefault();
+            function (e) {
+                e.preventDefault();
 
                 const target =
                     document.querySelector(
@@ -642,18 +889,20 @@ document
                     );
 
                 if (target) {
-                    target.scrollIntoView({
-                        behavior: "smooth",
-                        block: "start",
-                    });
+                    target.scrollIntoView(
+                        {
+                            behavior: "smooth",
+                            block: "start",
+                        }
+                    );
                 }
 
                 document
                     .querySelectorAll(
                         ".main-nav a"
                     )
-                    .forEach((link) => {
-                        link.classList.remove(
+                    .forEach((l) => {
+                        l.classList.remove(
                             "active"
                         );
                     });
@@ -669,7 +918,9 @@ document
         );
     });
 
-// Active menu on scroll
+/**
+ * Active menu on scroll
+ */
 window.addEventListener(
     "scroll",
     () => {
@@ -713,7 +964,7 @@ window.addEventListener(
                         .getAttribute(
                             "href"
                         )
-                        .substring(1) ===
+                        ?.substring(1) ===
                     currentSection
                 ) {
                     link.classList.add(
@@ -725,7 +976,9 @@ window.addEventListener(
     }
 );
 
-// Restore previous mailbox
+/**
+ * Restore previous session
+ */
 window.addEventListener(
     "DOMContentLoaded",
     () => {
@@ -734,32 +987,28 @@ window.addEventListener(
                 "tm_email"
             );
 
-        if (!savedEmail) {
-            return;
+        if (savedEmail) {
+            account = {
+                address: savedEmail,
+            };
+
+            const emailDisplay =
+                document.getElementById(
+                    "emailDisplay"
+                );
+
+            if (emailDisplay) {
+                emailDisplay.innerText =
+                    savedEmail;
+            }
+
+            checkInbox();
+
+            inboxInterval =
+                setInterval(
+                    checkInbox,
+                    15000
+                );
         }
-
-        account = {
-            address: savedEmail,
-        };
-
-        const emailDisplay =
-            document.getElementById(
-                "emailDisplay"
-            );
-
-        if (emailDisplay) {
-            emailDisplay.innerText =
-                savedEmail;
-        }
-
-        checkInbox();
-
-        inboxInterval =
-            setInterval(
-                () => {
-                    checkInbox();
-                },
-                15000
-            );
     }
 );
