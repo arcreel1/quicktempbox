@@ -2,32 +2,42 @@ let account = null;
 let inboxInterval = null;
 
 const API_BASE = "/api/tempmail";
-const MAIL_DOMAIN = "outlook.dpdns.org";
+const CUSTOM_DOMAIN = "outlook.dpdns.org";
 
 async function apiRequest(path, options = {}) {
-    const config = {
-        credentials: "same-origin",
-        ...options,
-        headers: {
-            "Content-Type": "application/json",
-            ...(options.headers || {})
-        }
-    };
-
-    const response = await fetch(`${API_BASE}${path}`, config);
-
-    let data = null;
-
     try {
-        data = await response.json();
-    } catch {
-        data = null;
-    }
+        const response = await fetch(`${API_BASE}${path}`, {
+            credentials: "same-origin",
+            ...options,
+            headers: {
+                "Content-Type": "application/json",
+                ...(options.headers || {}),
+            },
+        });
 
-    return {
-        response,
-        data
-    };
+        let data = null;
+
+        try {
+            data = await response.json();
+        } catch {
+            data = null;
+        }
+
+        return {
+            response,
+            data,
+        };
+    } catch (error) {
+        console.error("API request failed:", error);
+
+        return {
+            response: {
+                ok: false,
+                status: 0,
+            },
+            data: null,
+        };
+    }
 }
 
 function resetSessionState(clearEmailDisplay = true) {
@@ -50,89 +60,83 @@ function resetSessionState(clearEmailDisplay = true) {
     }
 }
 
-function generateUsername() {
-    return Math.random()
-        .toString(36)
-        .substring(2, 10);
-}
-
-function generatePassword() {
-    return Math.random()
-        .toString(36)
-        .substring(2, 14);
-}
-
 async function generateAccount() {
-    const button = document.querySelector(".generate-button");
-
-    if (button) {
-        button.disabled = true;
-    }
-
     try {
-        const username = generateUsername();
-        const address = `${username}@${MAIL_DOMAIN}`;
-        const password = generatePassword();
-
         showAlert("Creating temporary email...");
 
+        const username = Math.random()
+            .toString(36)
+            .substring(2, 10);
+
+        const password = Math.random()
+            .toString(36)
+            .substring(2, 12);
+
         /*
-         * 不再调用 /domains。
-         *
-         * 你的 Cloudflare /api/tempmail/domains
-         * 目前返回的是单个 Domain 对象，而不是
-         * Mail.tm 原始的 hydra:Collection。
-         *
-         * 因此这里直接使用自己的域名。
+         * We intentionally use your Cloudflare/Mail.tm domain.
+         * We do not depend on /domains to select the domain.
          */
+        const address = `${username}@${CUSTOM_DOMAIN}`;
+
+        console.log("Creating account:", address);
 
         const accountResult = await apiRequest("/accounts", {
             method: "POST",
             body: JSON.stringify({
-                address: address,
-                password: password
-            })
+                address,
+                password,
+            }),
         });
 
-        console.log("Create account:", accountResult.data);
+        console.log("Account response:", accountResult);
 
         if (!accountResult.response.ok) {
-            const message =
-                accountResult.data?.message ||
-                accountResult.data?.detail ||
-                "Failed to create temp email.";
+            console.error(
+                "Account creation failed:",
+                accountResult.data
+            );
 
-            showAlert(message);
+            showAlert(
+                accountResult.data?.message ||
+                "Failed to create temp email. Please try again."
+            );
+
             return;
         }
 
         /*
-         * 创建 Mail.tm Token。
-         * Cloudflare Function 会把 token 放进 HttpOnly Cookie。
+         * Login immediately after account creation.
          */
         const sessionResult = await apiRequest("/session", {
             method: "POST",
             body: JSON.stringify({
-                address: address,
-                password: password
-            })
+                address,
+                password,
+            }),
         });
 
-        console.log("Create session:", sessionResult.data);
+        console.log("Session response:", sessionResult);
 
         if (!sessionResult.response.ok) {
-            showAlert(
-                "Email was created, but secure session could not be started."
+            console.error(
+                "Session creation failed:",
+                sessionResult.data
             );
+
+            showAlert(
+                "Email created, but login session failed."
+            );
+
             return;
         }
 
         account = {
-            address: address,
-            password: password
+            address,
+            password,
         };
 
-        const emailDisplay = document.getElementById("emailDisplay");
+        const emailDisplay =
+            document.getElementById("emailDisplay");
 
         if (emailDisplay) {
             emailDisplay.innerText = address;
@@ -140,14 +144,18 @@ async function generateAccount() {
 
         localStorage.setItem("tm_email", address);
 
-        localStorage.removeItem("tm_read_messages");
-
+        /*
+         * Clear previous messages.
+         */
         const inbox = document.getElementById("inbox");
 
         if (inbox) {
-            inbox.innerHTML = "<p>Loading inbox...</p>";
+            inbox.innerHTML = "<p>No messages yet.</p>";
         }
 
+        /*
+         * Restart inbox polling.
+         */
         if (inboxInterval) {
             clearInterval(inboxInterval);
         }
@@ -161,29 +169,27 @@ async function generateAccount() {
         showAlert("Email account created successfully!");
     } catch (error) {
         console.error("generateAccount error:", error);
+
         showAlert("An error occurred. Please try again.");
-    } finally {
-        if (button) {
-            button.disabled = false;
-        }
     }
 }
 
 function showAlert(message) {
     const alert = document.getElementById("alert");
-    const alertMessage = document.getElementById("alertMessage");
+    const alertMessage =
+        document.getElementById("alertMessage");
 
-    if (!alert || !alertMessage) {
+    if (alert && alertMessage) {
+        alertMessage.textContent = message;
+
+        alert.classList.add("show");
+
+        setTimeout(() => {
+            closeAlert();
+        }, 3000);
+    } else {
         console.log("Alert:", message);
-        return;
     }
-
-    alertMessage.textContent = message;
-    alert.classList.add("show");
-
-    setTimeout(() => {
-        closeAlert();
-    }, 3000);
 }
 
 function closeAlert() {
@@ -195,18 +201,16 @@ function closeAlert() {
 }
 
 function copyEmail() {
-    const emailElement = document.getElementById("emailDisplay");
-
-    const email = emailElement
-        ? emailElement.innerText.trim()
-        : "";
+    const email =
+        document.getElementById("emailDisplay")?.innerText;
 
     if (!email || email === "---") {
         showAlert("Please generate an email first!");
         return;
     }
 
-    const copyIcons = document.querySelectorAll(".fa-copy");
+    const copyIcons =
+        document.querySelectorAll(".fa-copy");
 
     copyIcons.forEach((icon) => {
         icon.classList.remove("icon-animate-copy");
@@ -217,7 +221,7 @@ function copyEmail() {
     });
 
     if (!navigator.clipboard) {
-        showAlert("Clipboard is not supported.");
+        showAlert("Clipboard is not available.");
         return;
     }
 
@@ -227,7 +231,7 @@ function copyEmail() {
             showAlert("Email copied to clipboard!");
         })
         .catch((error) => {
-            console.error("Copy error:", error);
+            console.error("Copy failed:", error);
             showAlert("Failed to copy email.");
         });
 }
@@ -244,47 +248,37 @@ function triggerSpin(icon) {
     icon.classList.add("animate-spin");
 }
 
-const emailIcon = document.getElementById("emailRefreshIcon");
-
-if (emailIcon) {
-    emailIcon.addEventListener("click", () => {
-        triggerSpin(emailIcon);
-    });
-}
-
-const inboxIcon = document.getElementById("inboxRefreshIcon");
-
-if (inboxIcon) {
-    inboxIcon.addEventListener("click", () => {
-        triggerSpin(inboxIcon);
-    });
-}
-
-async function refreshInbox() {
-    const icon = document.getElementById("inboxRefreshIcon");
+function refreshInbox() {
+    const icon =
+        document.getElementById("inboxRefreshIcon");
 
     if (icon) {
-        icon.classList.remove("icon-animate-refresh");
+        icon.classList.remove(
+            "icon-animate-refresh"
+        );
 
         void icon.offsetWidth;
 
-        icon.classList.add("icon-animate-refresh");
+        icon.classList.add(
+            "icon-animate-refresh"
+        );
     }
 
-    try {
-        await checkInbox();
-    } finally {
+    checkInbox().finally(() => {
         if (icon) {
             setTimeout(() => {
-                icon.classList.remove("icon-animate-refresh");
+                icon.classList.remove(
+                    "icon-animate-refresh"
+                );
             }, 800);
         }
-    }
+    });
 }
 
 function getReadMessages() {
     try {
-        const stored = localStorage.getItem("tm_read_messages");
+        const stored =
+            localStorage.getItem("tm_read_messages");
 
         if (!stored) {
             return [];
@@ -295,8 +289,7 @@ function getReadMessages() {
         return Array.isArray(parsed)
             ? parsed
             : [];
-    } catch (error) {
-        console.error("Read messages error:", error);
+    } catch {
         return [];
     }
 }
@@ -314,47 +307,101 @@ function markMessageAsRead(messageId) {
     }
 }
 
+/*
+ * Safely escape HTML.
+ */
 function escapeHtml(value) {
     if (value === null || value === undefined) {
         return "";
     }
 
-    return String(value)
-        .replace(/&/g, "&amp;")
-        .replace(/</g, "&lt;")
-        .replace(/>/g, "&gt;")
-        .replace(/"/g, "&quot;")
-        .replace(/'/g, "&#039;");
+    const div = document.createElement("div");
+
+    div.textContent = String(value);
+
+    return div.innerHTML;
 }
 
-function extractMessages(data) {
+/*
+ * Convert URLs into clickable links.
+ */
+function linkify(text) {
+    const escaped = escapeHtml(text);
+
+    return escaped.replace(
+        /(https?:\/\/[^\s<]+)/g,
+        '<a href="$1" target="_blank" rel="noopener noreferrer">$1</a>'
+    );
+}
+
+/*
+ * Extract useful text from Mail.tm message response.
+ */
+function getMessageText(data) {
     if (!data) {
-        return [];
+        return "";
     }
 
     /*
-     * 标准 Mail.tm Collection
+     * Normal Mail.tm text message.
      */
-    if (Array.isArray(data["hydra:member"])) {
-        return data["hydra:member"];
+    if (
+        typeof data.text === "string" &&
+        data.text.trim()
+    ) {
+        return data.text;
     }
 
     /*
-     * 兼容其他 API 返回格式
+     * Sometimes the API may return an array.
      */
-    if (Array.isArray(data.member)) {
-        return data.member;
+    if (Array.isArray(data.text)) {
+        const text = data.text
+            .filter(Boolean)
+            .join("\n");
+
+        if (text.trim()) {
+            return text;
+        }
     }
 
-    if (Array.isArray(data.messages)) {
-        return data.messages;
+    /*
+     * Try intro as fallback.
+     */
+    if (
+        typeof data.intro === "string" &&
+        data.intro.trim()
+    ) {
+        return data.intro;
     }
 
-    if (Array.isArray(data)) {
-        return data;
+    /*
+     * Try HTML body as final fallback.
+     */
+    if (
+        typeof data.html === "string" &&
+        data.html.trim()
+    ) {
+        const temp = document.createElement("div");
+
+        temp.innerHTML = data.html;
+
+        return temp.innerText || "";
     }
 
-    return [];
+    if (Array.isArray(data.html)) {
+        const html = data.html
+            .filter(Boolean)
+            .join("\n");
+
+        const temp = document.createElement("div");
+
+        temp.innerHTML = html;
+
+        return temp.innerText || "";
+    }
+
+    return "";
 }
 
 async function checkInbox() {
@@ -362,20 +409,29 @@ async function checkInbox() {
         return;
     }
 
-    const inbox = document.getElementById("inbox");
+    const inbox =
+        document.getElementById("inbox");
 
     if (!inbox) {
         return;
     }
 
     try {
-        const inboxResult = await apiRequest("/messages", {
-            method: "GET"
-        });
+        const inboxResult = await apiRequest(
+            "/messages",
+            {
+                method: "GET",
+            }
+        );
 
-        console.log("Inbox response:", inboxResult.data);
+        console.log(
+            "Messages response:",
+            inboxResult
+        );
 
-        if (inboxResult.response.status === 401) {
+        if (
+            inboxResult.response.status === 401
+        ) {
             resetSessionState(false);
 
             inbox.innerHTML =
@@ -393,16 +449,21 @@ async function checkInbox() {
                 "<p>Failed to load inbox.</p>";
 
             showAlert(
-                inboxResult.data?.message ||
                 "Failed to load inbox."
             );
 
             return;
         }
 
-        const messages = extractMessages(
-            inboxResult.data
-        );
+        const inboxData =
+            inboxResult.data || {};
+
+        const messages =
+            Array.isArray(
+                inboxData["hydra:member"]
+            )
+                ? inboxData["hydra:member"]
+                : [];
 
         inbox.innerHTML = "";
 
@@ -413,59 +474,50 @@ async function checkInbox() {
             return;
         }
 
-        const readMessages = getReadMessages();
+        const readMessages =
+            getReadMessages();
 
         messages.forEach((msg) => {
-            const messageId =
-                msg.id ||
-                msg["@id"] ||
-                Math.random().toString(36);
+            const messageDiv =
+                document.createElement("div");
 
-            const sender =
+            messageDiv.classList.add(
+                "message"
+            );
+
+            const messageId = msg.id;
+
+            const isRead =
+                msg.seen ||
+                readMessages.includes(messageId);
+
+            messageDiv.classList.add(
+                isRead
+                    ? "read"
+                    : "unread"
+            );
+
+            messageDiv.dataset.messageId =
+                messageId || "";
+
+            const receivedDate =
+                msg.createdAt
+                    ? new Date(
+                        msg.createdAt
+                    ).toLocaleString()
+                    : "";
+
+            const fromAddress =
                 msg.from?.address ||
-                msg.from?.name ||
                 "Unknown sender";
 
             const subject =
                 msg.subject ||
                 "(No subject)";
 
-            const intro =
+            const preview =
                 msg.intro ||
-                msg.preview ||
                 "";
-
-            const createdAt =
-                msg.createdAt ||
-                msg.date ||
-                msg.created_at;
-
-            let receivedDate = "";
-
-            if (createdAt) {
-                const date = new Date(createdAt);
-
-                if (!Number.isNaN(date.getTime())) {
-                    receivedDate =
-                        date.toLocaleString();
-                }
-            }
-
-            const messageDiv =
-                document.createElement("div");
-
-            messageDiv.classList.add("message");
-
-            const isRead =
-                msg.seen === true ||
-                readMessages.includes(messageId);
-
-            messageDiv.classList.add(
-                isRead ? "read" : "unread"
-            );
-
-            messageDiv.dataset.messageId =
-                messageId;
 
             const header =
                 document.createElement("div");
@@ -475,10 +527,20 @@ async function checkInbox() {
             );
 
             header.innerHTML = `
-                <strong>From:</strong> ${escapeHtml(sender)}<br>
-                <strong>Subject:</strong> ${escapeHtml(subject)}<br>
-                <strong>Time:</strong> ${escapeHtml(receivedDate)}<br>
-                <strong>Preview:</strong> ${escapeHtml(intro)}
+                <strong>From:</strong>
+                ${escapeHtml(fromAddress)}
+                <br>
+
+                <strong>Subject:</strong>
+                ${escapeHtml(subject)}
+                <br>
+
+                <strong>Time:</strong>
+                ${escapeHtml(receivedDate)}
+                <br>
+
+                <strong>Preview:</strong>
+                ${escapeHtml(preview)}
             `;
 
             messageDiv.appendChild(header);
@@ -490,125 +552,107 @@ async function checkInbox() {
                 );
             };
 
-            inbox.appendChild(messageDiv);
+            inbox.appendChild(
+                messageDiv
+            );
         });
     } catch (error) {
-        console.error("checkInbox error:", error);
+        console.error(
+            "checkInbox error:",
+            error
+        );
 
         inbox.innerHTML =
             "<p>Error loading messages.</p>";
 
-        showAlert("Error loading inbox.");
+        showAlert(
+            "Error loading inbox."
+        );
     }
-}
-
-function getMessageBody(data) {
-    if (!data) {
-        return "";
-    }
-
-    /*
-     * Mail.tm 通常会返回 text。
-     */
-    if (
-        typeof data.text === "string" &&
-        data.text.trim()
-    ) {
-        return data.text;
-    }
-
-    /*
-     * 某些情况下 text 可能是空字符串，
-     * 但 html 有正文。
-     */
-    if (
-        typeof data.html === "string" &&
-        data.html.trim()
-    ) {
-        return data.html;
-    }
-
-    /*
-     * 某些 API 会返回 html 数组。
-     */
-    if (
-        Array.isArray(data.html) &&
-        data.html.length > 0
-    ) {
-        return data.html.join("\n");
-    }
-
-    /*
-     * 兼容其他字段。
-     */
-    if (
-        typeof data.body === "string" &&
-        data.body.trim()
-    ) {
-        return data.body;
-    }
-
-    if (
-        typeof data.content === "string" &&
-        data.content.trim()
-    ) {
-        return data.content;
-    }
-
-    return "";
-}
-
-function linkify(text) {
-    const escaped = escapeHtml(text);
-
-    return escaped.replace(
-        /(https?:\/\/[^\s<]+)/g,
-        '<a href="$1" target="_blank" rel="noopener noreferrer">$1</a>'
-    );
 }
 
 async function showMessage(id, div) {
-    if (!div) {
+    if (!id || !div) {
         return;
     }
 
-    div.classList.remove("unread");
-    div.classList.add("read");
-
-    markMessageAsRead(id);
-
+    /*
+     * Toggle message body.
+     */
     const existingBody =
-        div.querySelector(".message-body");
+        div.querySelector(
+            ".message-body"
+        );
 
     if (existingBody) {
         existingBody.remove();
         return;
     }
 
+    div.classList.remove(
+        "unread"
+    );
+
+    div.classList.add(
+        "read"
+    );
+
+    markMessageAsRead(id);
+
+    /*
+     * Loading indicator.
+     */
+    const loadingDiv =
+        document.createElement("div");
+
+    loadingDiv.classList.add(
+        "message-body"
+    );
+
+    loadingDiv.innerHTML =
+        "<p>Loading message...</p>";
+
+    div.appendChild(
+        loadingDiv
+    );
+
     try {
+        console.log(
+            "Loading message:",
+            id
+        );
+
         const messageResult =
             await apiRequest(
                 `/messages/${encodeURIComponent(id)}`,
                 {
-                    method: "GET"
+                    method: "GET",
                 }
             );
 
         console.log(
-            "Message detail:",
-            messageResult.data
+            "Message detail response:",
+            messageResult
         );
 
-        if (!messageResult.response.ok) {
+        if (
+            !messageResult.response.ok
+        ) {
             throw new Error(
-                messageResult.data?.message ||
-                "Failed to fetch message"
+                `HTTP ${messageResult.response.status}`
             );
         }
 
-        const data = messageResult.data;
+        const data =
+            messageResult.data || {};
 
-        const body = getMessageBody(data);
+        /*
+         * Remove loading box.
+         */
+        loadingDiv.remove();
+
+        const body =
+            getMessageText(data);
 
         const newDiv =
             document.createElement("div");
@@ -617,6 +661,9 @@ async function showMessage(id, div) {
             "message-body"
         );
 
+        /*
+         * Message content.
+         */
         const contentDiv =
             document.createElement("div");
 
@@ -624,14 +671,24 @@ async function showMessage(id, div) {
             "message-content"
         );
 
-        if (body) {
+        if (body.trim()) {
             contentDiv.innerHTML =
                 linkify(body);
         } else {
-            contentDiv.innerHTML =
-                "<p>No message content.</p>";
+            /*
+             * Show useful debugging information
+             * instead of simply displaying blank.
+             */
+            contentDiv.innerHTML = `
+                <p>
+                    No message content.
+                </p>
+            `;
         }
 
+        /*
+         * Controls.
+         */
         const controlsDiv =
             document.createElement("div");
 
@@ -639,6 +696,9 @@ async function showMessage(id, div) {
             "message-controls"
         );
 
+        /*
+         * Copy button.
+         */
         const copyButton =
             document.createElement("button");
 
@@ -646,18 +706,20 @@ async function showMessage(id, div) {
             "message-copy"
         );
 
-        copyButton.innerHTML =
-            '<i class="fas fa-copy"></i>';
+        copyButton.type = "button";
 
         copyButton.title =
             "Copy message";
 
-        copyButton.onclick = (event) => {
-            event.stopPropagation();
+        copyButton.innerHTML =
+            '<i class="fas fa-copy"></i>';
 
-            if (!body) {
+        copyButton.onclick = (e) => {
+            e.stopPropagation();
+
+            if (!body.trim()) {
                 showAlert(
-                    "There is no message content to copy."
+                    "No message content to copy."
                 );
 
                 return;
@@ -665,7 +727,7 @@ async function showMessage(id, div) {
 
             if (!navigator.clipboard) {
                 showAlert(
-                    "Clipboard is not supported."
+                    "Clipboard is not available."
                 );
 
                 return;
@@ -685,6 +747,9 @@ async function showMessage(id, div) {
                 });
         };
 
+        /*
+         * Close button.
+         */
         const closeButton =
             document.createElement("button");
 
@@ -692,14 +757,17 @@ async function showMessage(id, div) {
             "message-close"
         );
 
-        closeButton.innerHTML =
-            '<i class="fas fa-times"></i>';
+        closeButton.type = "button";
 
         closeButton.title =
             "Close message";
 
-        closeButton.onclick = (event) => {
-            event.stopPropagation();
+        closeButton.innerHTML =
+            '<i class="fas fa-times"></i>';
+
+        closeButton.onclick = (e) => {
+            e.stopPropagation();
+
             newDiv.remove();
         };
 
@@ -719,16 +787,24 @@ async function showMessage(id, div) {
             controlsDiv
         );
 
-        newDiv.onclick = (event) => {
-            event.stopPropagation();
+        newDiv.onclick = (e) => {
+            e.stopPropagation();
         };
 
-        div.appendChild(newDiv);
+        div.appendChild(
+            newDiv
+        );
     } catch (error) {
         console.error(
             "showMessage error:",
             error
         );
+
+        loadingDiv.innerHTML = `
+            <p>
+                Failed to load message content.
+            </p>
+        `;
 
         showAlert(
             "Failed to load message content."
@@ -763,9 +839,12 @@ async function deleteAccount() {
     }
 
     try {
-        await apiRequest("/logout", {
-            method: "POST"
-        });
+        await apiRequest(
+            "/logout",
+            {
+                method: "POST",
+            }
+        );
     } catch (error) {
         console.error(
             "Logout error:",
@@ -788,21 +867,76 @@ async function deleteAccount() {
     );
 }
 
-function setupMobileMenu() {
-    const mobileMenuBtn =
-        document.querySelector(
-            ".mobile-menu-btn"
-        );
+/*
+ * Refresh icons.
+ */
+document.addEventListener(
+    "DOMContentLoaded",
+    () => {
+        const emailIcon =
+            document.getElementById(
+                "emailRefreshIcon"
+            );
 
-    const mainNav =
-        document.querySelector(
-            ".main-nav"
-        );
+        const inboxIcon =
+            document.getElementById(
+                "inboxRefreshIcon"
+            );
 
-    if (!mobileMenuBtn || !mainNav) {
-        return;
+        if (emailIcon) {
+            emailIcon.addEventListener(
+                "click",
+                () => {
+                    triggerSpin(
+                        emailIcon
+                    );
+                }
+            );
+        }
+
+        if (inboxIcon) {
+            inboxIcon.addEventListener(
+                "click",
+                () => {
+                    triggerSpin(
+                        inboxIcon
+                    );
+                }
+            );
+        }
     }
+);
 
+/*
+ * Current year.
+ */
+const yearEl =
+    document.getElementById(
+        "currentYear"
+    );
+
+if (yearEl) {
+    yearEl.textContent =
+        new Date().getFullYear();
+}
+
+/*
+ * Mobile menu.
+ */
+const mobileMenuBtn =
+    document.querySelector(
+        ".mobile-menu-btn"
+    );
+
+const mainNav =
+    document.querySelector(
+        ".main-nav"
+    );
+
+if (
+    mobileMenuBtn &&
+    mainNav
+) {
     mobileMenuBtn.addEventListener(
         "click",
         () => {
@@ -811,195 +945,175 @@ function setupMobileMenu() {
             );
         }
     );
-
-    document
-        .querySelectorAll(".main-nav a")
-        .forEach((link) => {
-            link.addEventListener(
-                "click",
-                () => {
-                    mainNav.classList.remove(
-                        "show"
-                    );
-                }
-            );
-        });
 }
 
-function setupSmoothScroll() {
-    document
-        .querySelectorAll(
-            'a[href^="#"]'
-        )
-        .forEach((anchor) => {
-            anchor.addEventListener(
-                "click",
-                function (event) {
-                    event.preventDefault();
+/*
+ * Close mobile menu after navigation.
+ */
+document
+    .querySelectorAll(
+        ".main-nav a"
+    )
+    .forEach((link) => {
+        link.addEventListener(
+            "click",
+            () => {
+                mainNav?.classList.remove(
+                    "show"
+                );
+            }
+        );
+    });
 
-                    const selector =
+/*
+ * Smooth scrolling.
+ */
+document
+    .querySelectorAll(
+        'a[href^="#"]'
+    )
+    .forEach((anchor) => {
+        anchor.addEventListener(
+            "click",
+            function (e) {
+                e.preventDefault();
+
+                const target =
+                    document.querySelector(
                         this.getAttribute(
                             "href"
-                        );
-
-                    const target =
-                        document.querySelector(
-                            selector
-                        );
-
-                    if (target) {
-                        target.scrollIntoView({
-                            behavior: "smooth",
-                            block: "start"
-                        });
-                    }
-
-                    document
-                        .querySelectorAll(
-                            ".main-nav a"
                         )
-                        .forEach((link) => {
-                            link.classList.remove(
-                                "active"
-                            );
-                        });
-
-                    this.classList.add(
-                        "active"
-                    );
-                }
-            );
-        });
-}
-
-function setupScrollNavigation() {
-    window.addEventListener(
-        "scroll",
-        () => {
-            const sections =
-                document.querySelectorAll(
-                    "section, div[id]"
-                );
-
-            const navLinks =
-                document.querySelectorAll(
-                    ".main-nav a"
-                );
-
-            let currentSection = "";
-
-            sections.forEach(
-                (section) => {
-                    const top =
-                        section.offsetTop;
-
-                    if (
-                        window.pageYOffset >=
-                        top - 60
-                    ) {
-                        const id =
-                            section.getAttribute(
-                                "id"
-                            );
-
-                        if (id) {
-                            currentSection =
-                                id;
-                        }
-                    }
-                }
-            );
-
-            navLinks.forEach(
-                (link) => {
-                    link.classList.remove(
-                        "active"
                     );
 
-                    const href =
-                        link.getAttribute(
-                            "href"
-                        );
+                if (target) {
+                    target.scrollIntoView({
+                        behavior: "smooth",
+                        block: "start",
+                    });
+                }
 
-                    if (
-                        href &&
-                        href.startsWith("#") &&
-                        href.substring(1) ===
-                            currentSection
-                    ) {
-                        link.classList.add(
+                document
+                    .querySelectorAll(
+                        ".main-nav a"
+                    )
+                    .forEach((link) => {
+                        link.classList.remove(
                             "active"
                         );
-                    }
-                }
-            );
-        }
-    );
-}
+                    });
 
-function restoreSession() {
-    const savedEmail =
-        localStorage.getItem(
-            "tm_email"
+                this.classList.add(
+                    "active"
+                );
+
+                mainNav?.classList.remove(
+                    "show"
+                );
+            }
         );
+    });
 
-    if (!savedEmail) {
-        return;
-    }
-
-    /*
-     * 注意：
-     * 真正的 token 在 HttpOnly Cookie 中，
-     * JavaScript 无法读取。
-     *
-     * 这里先恢复 UI，然后让 checkInbox()
-     * 判断 Cookie 是否仍然有效。
-     */
-    account = {
-        address: savedEmail
-    };
-
-    const emailDisplay =
-        document.getElementById(
-            "emailDisplay"
-        );
-
-    if (emailDisplay) {
-        emailDisplay.innerText =
-            savedEmail;
-    }
-
-    checkInbox();
-
-    if (inboxInterval) {
-        clearInterval(inboxInterval);
-    }
-
-    inboxInterval = setInterval(
-        () => {
-            checkInbox();
-        },
-        15000
-    );
-}
-
-document.addEventListener(
-    "DOMContentLoaded",
+/*
+ * Active navigation on scroll.
+ */
+window.addEventListener(
+    "scroll",
     () => {
-        const yearEl =
-            document.getElementById(
-                "currentYear"
+        const sections =
+            document.querySelectorAll(
+                "section, div[id]"
             );
 
-        if (yearEl) {
-            yearEl.textContent =
-                new Date().getFullYear();
+        const navLinks =
+            document.querySelectorAll(
+                ".main-nav a"
+            );
+
+        let currentSection = "";
+
+        sections.forEach(
+            (section) => {
+                const top =
+                    section.offsetTop;
+
+                if (
+                    window.pageYOffset >=
+                    top - 60
+                ) {
+                    currentSection =
+                        section.getAttribute(
+                            "id"
+                        );
+                }
+            }
+        );
+
+        navLinks.forEach(
+            (link) => {
+                link.classList.remove(
+                    "active"
+                );
+
+                if (
+                    link
+                        .getAttribute(
+                            "href"
+                        )
+                        .substring(1) ===
+                    currentSection
+                ) {
+                    link.classList.add(
+                        "active"
+                    );
+                }
+            }
+        );
+    }
+);
+
+/*
+ * Restore previous email after page reload.
+ */
+window.addEventListener(
+    "DOMContentLoaded",
+    async () => {
+        const savedEmail =
+            localStorage.getItem(
+                "tm_email"
+            );
+
+        if (!savedEmail) {
+            return;
         }
 
-        setupMobileMenu();
-        setupSmoothScroll();
-        setupScrollNavigation();
+        account = {
+            address: savedEmail,
+        };
 
-        restoreSession();
+        const emailDisplay =
+            document.getElementById(
+                "emailDisplay"
+            );
+
+        if (emailDisplay) {
+            emailDisplay.innerText =
+                savedEmail;
+        }
+
+        await checkInbox();
+
+        if (inboxInterval) {
+            clearInterval(
+                inboxInterval
+            );
+        }
+
+        inboxInterval =
+            setInterval(
+                () => {
+                    checkInbox();
+                },
+                15000
+            );
     }
 );
