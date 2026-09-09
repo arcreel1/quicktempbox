@@ -73,14 +73,14 @@ function randomString(length = 8) {
     const chars =
         "abcdefghijklmnopqrstuvwxyz0123456789";
 
-    const array = new Uint8Array(length);
-
-    crypto.getRandomValues(array);
-
     let result = "";
 
+    const bytes = new Uint8Array(length);
+
+    crypto.getRandomValues(bytes);
+
     for (let i = 0; i < length; i++) {
-        result += chars[array[i] % chars.length];
+        result += chars[bytes[i] % chars.length];
     }
 
     return result;
@@ -95,13 +95,13 @@ function now() {
 }
 
 function getDB(env) {
-    return env.DB || env.D1 || env.quicktempbox;
+    return env.DB;
 }
 
 async function ensureTables(db) {
     if (!db) {
         throw new Error(
-            "D1 binding not found. Please bind your D1 database as DB."
+            "D1 binding DB not found. Check Pages > Settings > Functions > D1 database bindings."
         );
     }
 
@@ -159,22 +159,21 @@ function makeHydra(messages) {
     };
 }
 
-function safeJsonParse(value, fallback = []) {
+function safeRecipients(value) {
     try {
-        const parsed = JSON.parse(value);
+        const parsed = JSON.parse(value || "[]");
+
+        if (!Array.isArray(parsed)) {
+            return [];
+        }
 
         return parsed;
     } catch {
-        return fallback;
+        return [];
     }
 }
 
 function messageListItem(row) {
-    const recipients = safeJsonParse(
-        row.recipients || "[]",
-        []
-    );
-
     return {
         id: row.id,
 
@@ -182,11 +181,11 @@ function messageListItem(row) {
             address: row.sender || "unknown",
         },
 
-        to: Array.isArray(recipients)
-            ? recipients.map((address) => ({
+        to: safeRecipients(row.recipients).map(
+            (address) => ({
                 address,
-            }))
-            : [],
+            })
+        ),
 
         subject: row.subject || "",
         intro: row.intro || "",
@@ -200,10 +199,10 @@ function messageListItem(row) {
 
 function decodeBase64Utf8(value) {
     try {
-        const cleaned = String(value || "")
+        const clean = String(value || "")
             .replace(/\s/g, "");
 
-        const binary = atob(cleaned);
+        const binary = atob(clean);
 
         const bytes = new Uint8Array(
             binary.length
@@ -217,7 +216,7 @@ function decodeBase64Utf8(value) {
             bytes
         );
     } catch {
-        return value || "";
+        return value;
     }
 }
 
@@ -240,12 +239,7 @@ function decodeMimeWord(value) {
 
     return value.replace(
         /=\?([^?]+)\?([bBqQ])\?([^?]+)\?=/g,
-        (
-            _match,
-            charset,
-            encoding,
-            content
-        ) => {
+        (_, charset, encoding, content) => {
             try {
                 if (
                     encoding.toLowerCase() === "b"
@@ -267,15 +261,18 @@ function decodeMimeWord(value) {
                             binary.charCodeAt(i);
                     }
 
-                    const decoderCharset =
-                        charset
-                            .toLowerCase()
-                            .includes("gb")
+                    const normalizedCharset =
+                        charset.toLowerCase();
+
+                    const decoder =
+                        normalizedCharset.includes(
+                            "gb"
+                        )
                             ? "gb18030"
                             : "utf-8";
 
                     return new TextDecoder(
-                        decoderCharset
+                        decoder
                     ).decode(bytes);
                 }
 
@@ -304,9 +301,7 @@ function getHeader(raw, name) {
         "im"
     );
 
-    const match = String(raw || "").match(
-        regex
-    );
+    const match = raw.match(regex);
 
     if (!match) {
         return "";
@@ -318,84 +313,27 @@ function getHeader(raw, name) {
 }
 
 function extractMimeBody(raw) {
-    const input = String(raw || "");
+    const headerEnd =
+        raw.search(/\r?\n\r?\n/);
 
-    const separatorMatch =
-        input.match(/\r?\n\r?\n/);
-
-    if (!separatorMatch) {
+    if (headerEnd === -1) {
         return {
-            headers: input,
+            headers: raw,
             body: "",
         };
     }
 
-    const headerEnd =
-        separatorMatch.index;
+    const separator =
+        raw.match(/\r?\n\r?\n/);
 
     return {
-        headers: input.slice(
-            0,
-            headerEnd
-        ),
+        headers: raw.slice(0, headerEnd),
 
-        body: input.slice(
+        body: raw.slice(
             headerEnd +
-                separatorMatch[0].length
+                separator[0].length
         ),
     };
-}
-
-function decodeMimePart(
-    body,
-    transferEncoding
-) {
-    if (
-        /base64/i.test(
-            transferEncoding || ""
-        )
-    ) {
-        return decodeBase64Utf8(body);
-    }
-
-    if (
-        /quoted-printable/i.test(
-            transferEncoding || ""
-        )
-    ) {
-        return decodeQuotedPrintable(body);
-    }
-
-    return body || "";
-}
-
-function htmlToText(html) {
-    return String(html || "")
-        .replace(
-            /<style[\s\S]*?<\/style>/gi,
-            ""
-        )
-        .replace(
-            /<script[\s\S]*?<\/script>/gi,
-            ""
-        )
-        .replace(
-            /<br\s*\/?>/gi,
-            "\n"
-        )
-        .replace(
-            /<\/p>/gi,
-            "\n"
-        )
-        .replace(
-            /<[^>]+>/g,
-            " "
-        )
-        .replace(
-            /\s+/g,
-            " "
-        )
-        .trim();
 }
 
 function parseEmail(rawEmail) {
@@ -424,20 +362,29 @@ function parseEmail(rawEmail) {
             "Content-Transfer-Encoding"
         );
 
-    let decodedBody =
-        decodeMimePart(
-            body,
-            transferEncoding
-        );
+    let decodedBody = body;
 
-    let text = "";
+    if (
+        /base64/i.test(
+            transferEncoding
+        )
+    ) {
+        decodedBody =
+            decodeBase64Utf8(body);
+    } else if (
+        /quoted-printable/i.test(
+            transferEncoding
+        )
+    ) {
+        decodedBody =
+            decodeQuotedPrintable(body);
+    }
+
+    let text = decodedBody;
     let html = "";
 
     if (
         /multipart\/alternative/i.test(
-            contentType
-        ) ||
-        /multipart\/mixed/i.test(
             contentType
         )
     ) {
@@ -455,30 +402,34 @@ function parseEmail(rawEmail) {
                     `--${boundary}`
                 );
 
-            for (
-                const part of parts
-            ) {
-                const {
-                    headers:
-                        partHeaders,
-                    body:
-                        partBody,
-                } =
-                    extractMimeBody(
-                        part
+            for (const part of parts) {
+                const partHeaderEnd =
+                    part.search(
+                        /\r?\n\r?\n/
                     );
 
                 if (
-                    !partHeaders ||
-                    !partBody
+                    partHeaderEnd === -1
                 ) {
                     continue;
                 }
 
-                const partType =
-                    getHeader(
-                        partHeaders,
-                        "Content-Type"
+                const partSeparator =
+                    part.match(
+                        /\r?\n\r?\n/
+                    );
+
+                const partHeaders =
+                    part.slice(
+                        0,
+                        partHeaderEnd
+                    );
+
+                let partBody =
+                    part.slice(
+                        partHeaderEnd +
+                            partSeparator[0]
+                                .length
                     );
 
                 const partEncoding =
@@ -487,77 +438,81 @@ function parseEmail(rawEmail) {
                         "Content-Transfer-Encoding"
                     );
 
-                const decodedPart =
-                    decodeMimePart(
-                        partBody,
-                        partEncoding
-                    ).trim();
-
                 if (
-                    /text\/plain/i.test(
-                        partType
+                    /base64/i.test(
+                        partEncoding
                     )
                 ) {
-                    text =
-                        decodedPart;
+                    partBody =
+                        decodeBase64Utf8(
+                            partBody
+                        );
+                } else if (
+                    /quoted-printable/i.test(
+                        partEncoding
+                    )
+                ) {
+                    partBody =
+                        decodeQuotedPrintable(
+                            partBody
+                        );
                 }
 
                 if (
                     /text\/html/i.test(
-                        partType
+                        partHeaders
                     )
                 ) {
                     html =
-                        decodedPart;
+                        partBody.trim();
+                }
+
+                if (
+                    /text\/plain/i.test(
+                        partHeaders
+                    )
+                ) {
+                    text =
+                        partBody.trim();
                 }
             }
         }
-    } else if (
-        /text\/html/i.test(
-            contentType
-        )
-    ) {
-        html =
-            decodedBody.trim();
-
-        text =
-            htmlToText(html);
-    } else {
-        text =
-            decodedBody.trim();
     }
 
     if (!text && html) {
-        text =
-            htmlToText(html);
+        text = html
+            .replace(
+                /<style[\s\S]*?<\/style>/gi,
+                ""
+            )
+            .replace(
+                /<script[\s\S]*?<\/script>/gi,
+                ""
+            )
+            .replace(
+                /<[^>]+>/g,
+                " "
+            )
+            .replace(
+                /\s+/g,
+                " "
+            )
+            .trim();
     }
 
     return {
-        subject:
-            subject || "",
-
-        text:
-            text || "",
-
-        html:
-            html || "",
-
-        intro:
-            (text || "")
-                .replace(
-                    /\s+/g,
-                    " "
-                )
-                .trim()
-                .slice(0, 200),
+        subject: subject || "",
+        text: text || "",
+        html: html || "",
+        intro: (text || "")
+            .replace(/\s+/g, " ")
+            .trim()
+            .slice(0, 200),
     };
 }
 
-async function getMailbox(
-    db,
-    address
-) {
-    return await db
+async function getMailbox(db, address) {
+    return db
         .prepare(
             `
             SELECT *
@@ -571,11 +526,8 @@ async function getMailbox(
         .first();
 }
 
-async function getMailboxById(
-    db,
-    id
-) {
-    return await db
+async function getMailboxById(db, id) {
+    return db
         .prepare(
             `
             SELECT *
@@ -601,10 +553,10 @@ async function createMailbox(
         address.split("@");
 
     const localPart =
-        parts[0] || "";
+        parts[0];
 
     const domain =
-        parts[1] || DEFAULT_DOMAIN;
+        parts[1];
 
     const createdAt =
         now();
@@ -618,8 +570,7 @@ async function createMailbox(
     await db
         .prepare(
             `
-            INSERT INTO mailboxes
-            (
+            INSERT INTO mailboxes (
                 id,
                 address,
                 local_part,
@@ -652,9 +603,14 @@ async function createMailbox(
 
 async function handleDomains() {
     return json({
-        "@context": "/contexts/Domain",
-        "@id": "/domains",
-        "@type": "hydra:Collection",
+        "@context":
+            "/contexts/Domain",
+
+        "@id":
+            "/domains",
+
+        "@type":
+            "hydra:Collection",
 
         "hydra:totalItems": 1,
 
@@ -663,7 +619,8 @@ async function handleDomains() {
                 "@id":
                     `/domains/${DEFAULT_DOMAIN}`,
 
-                "@type": "Domain",
+                "@type":
+                    "Domain",
 
                 id:
                     DEFAULT_DOMAIN,
@@ -671,9 +628,11 @@ async function handleDomains() {
                 domain:
                     DEFAULT_DOMAIN,
 
-                isActive: true,
+                isActive:
+                    true,
 
-                isPrivate: false,
+                isPrivate:
+                    false,
             },
         ],
     });
@@ -683,10 +642,39 @@ async function handleCreateAccount(
     request,
     env
 ) {
-    const db =
-        getDB(env);
+    const db = getDB(env);
 
-    await ensureTables(db);
+    if (!db) {
+        return json(
+            {
+                message:
+                    "D1 binding DB is missing.",
+                error:
+                    "Configure D1 database binding named DB.",
+            },
+            500
+        );
+    }
+
+    try {
+        await ensureTables(db);
+    } catch (error) {
+        console.error(
+            "ensureTables failed:",
+            error
+        );
+
+        return json(
+            {
+                message:
+                    "D1 database initialization failed.",
+                error:
+                    error?.message ||
+                    String(error),
+            },
+            500
+        );
+    }
 
     let payload;
 
@@ -705,14 +693,14 @@ async function handleCreateAccount(
 
     const address =
         String(
-            payload?.address || ""
+            payload.address || ""
         )
             .trim()
             .toLowerCase();
 
     const password =
         String(
-            payload?.password || ""
+            payload.password || ""
         );
 
     if (
@@ -725,6 +713,21 @@ async function handleCreateAccount(
                     "address and password are required",
             },
             400
+        );
+    }
+
+    const emailPattern =
+        /^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$/i;
+
+    if (
+        !emailPattern.test(address)
+    ) {
+        return json(
+            {
+                message:
+                    "Invalid email address",
+            },
+            422
         );
     }
 
@@ -745,61 +748,71 @@ async function handleCreateAccount(
         );
     }
 
-    const localPart =
-        address.slice(
-            0,
-            -expectedSuffix.length
+    try {
+        const existing =
+            await db
+                .prepare(
+                    `
+                    SELECT id
+                    FROM mailboxes
+                    WHERE lower(address) = lower(?)
+                    LIMIT 1
+                    `
+                )
+                .bind(address)
+                .first();
+
+        if (existing) {
+            return json(
+                {
+                    message:
+                        "Email address already exists",
+                },
+                409
+            );
+        }
+    } catch (error) {
+        console.error(
+            "Mailbox lookup failed:",
+            error
         );
 
-    if (
-        !localPart ||
-        localPart.includes("@") ||
-        localPart.length > 64
-    ) {
         return json(
             {
                 message:
-                    "Invalid email address",
+                    "Failed to check mailbox",
+                error:
+                    error?.message ||
+                    String(error),
             },
-            422
+            500
         );
     }
-
-    const existing =
-        await db
-            .prepare(
-                `
-                SELECT id
-                FROM mailboxes
-                WHERE lower(address) = lower(?)
-                LIMIT 1
-                `
-            )
-            .bind(address)
-            .first();
-
-    if (existing) {
-        return json(
-            {
-                message:
-                    "Email address already exists",
-            },
-            409
-        );
-    }
-
-    let mailbox;
 
     try {
-        mailbox =
+        const mailbox =
             await createMailbox(
                 db,
                 address,
                 password
             );
+
+        return json(
+            {
+                "@type":
+                    "Account",
+
+                id:
+                    mailbox.id,
+
+                address:
+                    mailbox.address,
+            },
+            201
+        );
     } catch (error) {
         console.error(
-            "createMailbox error:",
+            "createMailbox failed:",
             error
         );
 
@@ -814,30 +827,28 @@ async function handleCreateAccount(
             500
         );
     }
-
-    return json(
-        {
-            "@type":
-                "Account",
-
-            id:
-                mailbox.id,
-
-            address:
-                mailbox.address,
-        },
-        201
-    );
 }
 
 async function handleSession(
     request,
     env
 ) {
-    const db =
-        getDB(env);
+    const db = getDB(env);
 
-    await ensureTables(db);
+    try {
+        await ensureTables(db);
+    } catch (error) {
+        return json(
+            {
+                message:
+                    "D1 initialization failed",
+                error:
+                    error?.message ||
+                    String(error),
+            },
+            500
+        );
+    }
 
     let payload;
 
@@ -856,29 +867,44 @@ async function handleSession(
 
     const address =
         String(
-            payload?.address || ""
+            payload.address || ""
         )
             .trim()
             .toLowerCase();
 
     const password =
         String(
-            payload?.password || ""
+            payload.password || ""
         );
 
-    const mailbox =
-        await db
-            .prepare(
-                `
-                SELECT *
-                FROM mailboxes
-                WHERE lower(address) = lower(?)
-                  AND active = 1
-                LIMIT 1
-                `
-            )
-            .bind(address)
-            .first();
+    let mailbox;
+
+    try {
+        mailbox =
+            await db
+                .prepare(
+                    `
+                    SELECT *
+                    FROM mailboxes
+                    WHERE lower(address) = lower(?)
+                      AND active = 1
+                    LIMIT 1
+                    `
+                )
+                .bind(address)
+                .first();
+    } catch (error) {
+        return json(
+            {
+                message:
+                    "Failed to query mailbox",
+                error:
+                    error?.message ||
+                    String(error),
+            },
+            500
+        );
+    }
 
     if (
         !mailbox ||
@@ -912,15 +938,27 @@ async function handleMessages(
     env,
     route
 ) {
-    const db =
-        getDB(env);
+    const db = getDB(env);
 
-    await ensureTables(db);
+    try {
+        await ensureTables(db);
+    } catch (error) {
+        return json(
+            {
+                message:
+                    "D1 initialization failed",
+                error:
+                    error?.message ||
+                    String(error),
+            },
+            500
+        );
+    }
 
-    const sessionId =
+    const session =
         getSession(request);
 
-    if (!sessionId) {
+    if (!session) {
         return json(
             {
                 message:
@@ -933,7 +971,7 @@ async function handleMessages(
     const mailbox =
         await getMailboxById(
             db,
-            sessionId
+            session
         );
 
     if (!mailbox) {
@@ -964,9 +1002,7 @@ async function handleMessages(
                     LIMIT 100
                     `
                 )
-                .bind(
-                    mailbox.id
-                )
+                .bind(mailbox.id)
                 .all();
 
         const messages =
@@ -998,16 +1034,6 @@ async function handleMessages(
                     prefix.length
                 )
             );
-
-        if (!id) {
-            return json(
-                {
-                    message:
-                        "Message ID is required",
-                },
-                400
-            );
-        }
 
         const message =
             await db
@@ -1051,13 +1077,6 @@ async function handleMessages(
             )
             .run();
 
-        const recipients =
-            safeJsonParse(
-                message.recipients ||
-                    "[]",
-                []
-            );
-
         return json({
             id:
                 message.id,
@@ -1068,32 +1087,25 @@ async function handleMessages(
                     "unknown",
             },
 
-            to:
-                Array.isArray(
-                    recipients
-                )
-                    ? recipients.map(
-                        (address) => ({
-                            address,
-                        })
-                    )
-                    : [],
+            to: safeRecipients(
+                message.recipients
+            ).map(
+                (address) => ({
+                    address,
+                })
+            ),
 
             subject:
-                message.subject ||
-                "",
+                message.subject || "",
 
             intro:
-                message.intro ||
-                "",
+                message.intro || "",
 
             text:
-                message.text ||
-                "",
+                message.text || "",
 
             html:
-                message.html ||
-                "",
+                message.html || "",
 
             createdAt:
                 message.received_at,
@@ -1134,10 +1146,22 @@ async function handleReceive(
     request,
     env
 ) {
-    const db =
-        getDB(env);
+    const db = getDB(env);
 
-    await ensureTables(db);
+    try {
+        await ensureTables(db);
+    } catch (error) {
+        return json(
+            {
+                message:
+                    "D1 initialization failed",
+                error:
+                    error?.message ||
+                    String(error),
+            },
+            500
+        );
+    }
 
     const from =
         request.headers.get(
@@ -1156,8 +1180,8 @@ async function handleReceive(
         to
             .split(",")
             .map(
-                (x) =>
-                    x.trim().toLowerCase()
+                (value) =>
+                    value.trim().toLowerCase()
             )
             .filter(Boolean);
 
@@ -1197,8 +1221,7 @@ async function handleReceive(
         await db
             .prepare(
                 `
-                INSERT INTO messages
-                (
+                INSERT INTO messages (
                     id,
                     mailbox_id,
                     sender,
@@ -1217,8 +1240,7 @@ async function handleReceive(
             .bind(
                 id,
                 mailbox.id,
-                from ||
-                    "unknown",
+                from || "unknown",
                 JSON.stringify(
                     recipients
                 ),
@@ -1248,15 +1270,12 @@ function getRoute(params) {
     ) {
         return (
             "/" +
-            path
-                .filter(Boolean)
-                .join("/")
+            path.join("/")
         );
     }
 
     if (
-        typeof path ===
-        "string"
+        typeof path === "string"
     ) {
         return "/" + path;
     }
@@ -1333,8 +1352,7 @@ export async function onRequest(
         if (
             method === "GET" &&
             (
-                route ===
-                    "/messages" ||
+                route === "/messages" ||
                 route.startsWith(
                     "/messages/"
                 )
@@ -1361,7 +1379,6 @@ export async function onRequest(
             {
                 message:
                     "Route not found",
-
                 route,
             },
             404
@@ -1380,6 +1397,8 @@ export async function onRequest(
                 error:
                     error?.message ||
                     String(error),
+
+                route,
             },
             500
         );
