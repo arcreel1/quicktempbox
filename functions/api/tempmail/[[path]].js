@@ -70,19 +70,24 @@ function clearCookie() {
 }
 
 function randomString(length = 8) {
-    const chars = "abcdefghijklmnopqrstuvwxyz0123456789";
-
-    let result = "";
+    const chars =
+        "abcdefghijklmnopqrstuvwxyz0123456789";
 
     const array = new Uint8Array(length);
 
     crypto.getRandomValues(array);
+
+    let result = "";
 
     for (let i = 0; i < length; i++) {
         result += chars[array[i] % chars.length];
     }
 
     return result;
+}
+
+function createEmail() {
+    return `${randomString(8)}@${DEFAULT_DOMAIN}`;
 }
 
 function now() {
@@ -156,7 +161,7 @@ function makeHydra(messages) {
 
 function safeJsonParse(value, fallback = []) {
     try {
-        const parsed = JSON.parse(value || "");
+        const parsed = JSON.parse(value);
 
         return parsed;
     } catch {
@@ -166,34 +171,39 @@ function safeJsonParse(value, fallback = []) {
 
 function messageListItem(row) {
     const recipients = safeJsonParse(
-        row.recipients,
+        row.recipients || "[]",
         []
     );
 
     return {
         id: row.id,
+
         from: {
-            address: row.sender || "",
+            address: row.sender || "unknown",
         },
+
         to: Array.isArray(recipients)
             ? recipients.map((address) => ({
                 address,
             }))
             : [],
+
         subject: row.subject || "",
         intro: row.intro || "",
         createdAt: row.received_at,
         seen: Boolean(row.seen),
-        hasAttachments: Boolean(row.has_attachments),
+        hasAttachments: Boolean(
+            row.has_attachments
+        ),
     };
 }
 
 function decodeBase64Utf8(value) {
     try {
-        const clean = String(value || "")
+        const cleaned = String(value || "")
             .replace(/\s/g, "");
 
-        const binary = atob(clean);
+        const binary = atob(cleaned);
 
         const bytes = new Uint8Array(
             binary.length
@@ -203,7 +213,9 @@ function decodeBase64Utf8(value) {
             bytes[i] = binary.charCodeAt(i);
         }
 
-        return new TextDecoder("utf-8").decode(bytes);
+        return new TextDecoder("utf-8").decode(
+            bytes
+        );
     } catch {
         return value || "";
     }
@@ -226,14 +238,20 @@ function decodeMimeWord(value) {
         return "";
     }
 
-    return String(value).replace(
+    return value.replace(
         /=\?([^?]+)\?([bBqQ])\?([^?]+)\?=/g,
-        (_, charset, encoding, content) => {
+        (
+            _match,
+            charset,
+            encoding,
+            content
+        ) => {
             try {
                 if (
                     encoding.toLowerCase() === "b"
                 ) {
-                    const binary = atob(content);
+                    const binary =
+                        atob(content);
 
                     const bytes =
                         new Uint8Array(
@@ -249,16 +267,12 @@ function decodeMimeWord(value) {
                             binary.charCodeAt(i);
                     }
 
-                    let decoderCharset = "utf-8";
-
-                    if (
+                    const decoderCharset =
                         charset
                             .toLowerCase()
                             .includes("gb")
-                    ) {
-                        decoderCharset =
-                            "gb18030";
-                    }
+                            ? "gb18030"
+                            : "utf-8";
 
                     return new TextDecoder(
                         decoderCharset
@@ -306,31 +320,56 @@ function getHeader(raw, name) {
 function extractMimeBody(raw) {
     const input = String(raw || "");
 
-    const match = input.match(
-        /\r?\n\r?\n/
-    );
+    const separatorMatch =
+        input.match(/\r?\n\r?\n/);
 
-    if (!match) {
+    if (!separatorMatch) {
         return {
             headers: input,
             body: "",
         };
     }
 
-    const headerEnd = match.index;
+    const headerEnd =
+        separatorMatch.index;
 
     return {
         headers: input.slice(
             0,
             headerEnd
         ),
+
         body: input.slice(
-            headerEnd + match[0].length
+            headerEnd +
+                separatorMatch[0].length
         ),
     };
 }
 
-function stripHtml(html) {
+function decodeMimePart(
+    body,
+    transferEncoding
+) {
+    if (
+        /base64/i.test(
+            transferEncoding || ""
+        )
+    ) {
+        return decodeBase64Utf8(body);
+    }
+
+    if (
+        /quoted-printable/i.test(
+            transferEncoding || ""
+        )
+    ) {
+        return decodeQuotedPrintable(body);
+    }
+
+    return body || "";
+}
+
+function htmlToText(html) {
     return String(html || "")
         .replace(
             /<style[\s\S]*?<\/style>/gi,
@@ -353,31 +392,7 @@ function stripHtml(html) {
             " "
         )
         .replace(
-            /&nbsp;/gi,
-            " "
-        )
-        .replace(
-            /&amp;/gi,
-            "&"
-        )
-        .replace(
-            /&lt;/gi,
-            "<"
-        )
-        .replace(
-            /&gt;/gi,
-            ">"
-        )
-        .replace(
-            /\s+\n/g,
-            "\n"
-        )
-        .replace(
-            /\n\s+/g,
-            "\n"
-        )
-        .replace(
-            /[ \t]+/g,
+            /\s+/g,
             " "
         )
         .trim();
@@ -389,12 +404,13 @@ function parseEmail(rawEmail) {
         body,
     } = extractMimeBody(rawEmail);
 
-    const subject = decodeMimeWord(
-        getHeader(
-            headers,
-            "Subject"
-        )
-    );
+    const subject =
+        decodeMimeWord(
+            getHeader(
+                headers,
+                "Subject"
+            )
+        );
 
     const contentType =
         getHeader(
@@ -408,33 +424,20 @@ function parseEmail(rawEmail) {
             "Content-Transfer-Encoding"
         );
 
-    let decodedBody = body;
-
-    if (
-        /base64/i.test(
+    let decodedBody =
+        decodeMimePart(
+            body,
             transferEncoding
-        )
-    ) {
-        decodedBody =
-            decodeBase64Utf8(
-                body
-            );
-    } else if (
-        /quoted-printable/i.test(
-            transferEncoding
-        )
-    ) {
-        decodedBody =
-            decodeQuotedPrintable(
-                body
-            );
-    }
+        );
 
     let text = "";
     let html = "";
 
     if (
         /multipart\/alternative/i.test(
+            contentType
+        ) ||
+        /multipart\/mixed/i.test(
             contentType
         )
     ) {
@@ -455,28 +458,27 @@ function parseEmail(rawEmail) {
             for (
                 const part of parts
             ) {
-                const partSeparator =
-                    part.match(
-                        /\r?\n\r?\n/
+                const {
+                    headers:
+                        partHeaders,
+                    body:
+                        partBody,
+                } =
+                    extractMimeBody(
+                        part
                     );
 
                 if (
-                    !partSeparator
+                    !partHeaders ||
+                    !partBody
                 ) {
                     continue;
                 }
 
-                const partHeaders =
-                    part.slice(
-                        0,
-                        partSeparator.index
-                    );
-
-                let partBody =
-                    part.slice(
-                        partSeparator.index +
-                            partSeparator[0]
-                                .length
+                const partType =
+                    getHeader(
+                        partHeaders,
+                        "Content-Type"
                     );
 
                 const partEncoding =
@@ -485,42 +487,28 @@ function parseEmail(rawEmail) {
                         "Content-Transfer-Encoding"
                     );
 
-                if (
-                    /base64/i.test(
+                const decodedPart =
+                    decodeMimePart(
+                        partBody,
                         partEncoding
-                    )
-                ) {
-                    partBody =
-                        decodeBase64Utf8(
-                            partBody
-                        );
-                } else if (
-                    /quoted-printable/i.test(
-                        partEncoding
-                    )
-                ) {
-                    partBody =
-                        decodeQuotedPrintable(
-                            partBody
-                        );
-                }
+                    ).trim();
 
                 if (
                     /text\/plain/i.test(
-                        partHeaders
+                        partType
                     )
                 ) {
                     text =
-                        partBody.trim();
+                        decodedPart;
                 }
 
                 if (
                     /text\/html/i.test(
-                        partHeaders
+                        partType
                     )
                 ) {
                     html =
-                        partBody.trim();
+                        decodedPart;
                 }
             }
         }
@@ -533,9 +521,7 @@ function parseEmail(rawEmail) {
             decodedBody.trim();
 
         text =
-            stripHtml(
-                html
-            );
+            htmlToText(html);
     } else {
         text =
             decodedBody.trim();
@@ -543,16 +529,19 @@ function parseEmail(rawEmail) {
 
     if (!text && html) {
         text =
-            stripHtml(html);
+            htmlToText(html);
     }
 
     return {
         subject:
             subject || "",
+
         text:
             text || "",
+
         html:
             html || "",
+
         intro:
             (text || "")
                 .replace(
@@ -608,23 +597,14 @@ async function createMailbox(
     const id =
         crypto.randomUUID();
 
-    const atIndex =
-        address.lastIndexOf("@");
+    const parts =
+        address.split("@");
 
     const localPart =
-        atIndex > -1
-            ? address.slice(
-                0,
-                atIndex
-            )
-            : address;
+        parts[0] || "";
 
     const domain =
-        atIndex > -1
-            ? address.slice(
-                atIndex + 1
-            )
-            : DEFAULT_DOMAIN;
+        parts[1] || DEFAULT_DOMAIN;
 
     const createdAt =
         now();
@@ -672,25 +652,18 @@ async function createMailbox(
 
 async function handleDomains() {
     return json({
-        "@context":
-            "/contexts/Domain",
+        "@context": "/contexts/Domain",
+        "@id": "/domains",
+        "@type": "hydra:Collection",
 
-        "@id":
-            "/domains",
-
-        "@type":
-            "hydra:Collection",
-
-        "hydra:totalItems":
-            1,
+        "hydra:totalItems": 1,
 
         "hydra:member": [
             {
                 "@id":
                     `/domains/${DEFAULT_DOMAIN}`,
 
-                "@type":
-                    "Domain",
+                "@type": "Domain",
 
                 id:
                     DEFAULT_DOMAIN,
@@ -698,11 +671,9 @@ async function handleDomains() {
                 domain:
                     DEFAULT_DOMAIN,
 
-                isActive:
-                    true,
+                isActive: true,
 
-                isPrivate:
-                    false,
+                isPrivate: false,
             },
         ],
     });
@@ -781,9 +752,9 @@ async function handleCreateAccount(
         );
 
     if (
-        !/^[a-z0-9][a-z0-9._-]{2,31}$/i.test(
-            localPart
-        )
+        !localPart ||
+        localPart.includes("@") ||
+        localPart.length > 64
     ) {
         return json(
             {
@@ -817,51 +788,46 @@ async function handleCreateAccount(
         );
     }
 
+    let mailbox;
+
     try {
-        const mailbox =
+        mailbox =
             await createMailbox(
                 db,
                 address,
                 password
             );
-
-        return json(
-            {
-                "@type":
-                    "Account",
-
-                id:
-                    mailbox.id,
-
-                address:
-                    mailbox.address,
-            },
-            201
-        );
     } catch (error) {
         console.error(
             "createMailbox error:",
             error
         );
 
-        if (
-            String(
-                error?.message || ""
-            ).includes(
-                "UNIQUE"
-            )
-        ) {
-            return json(
-                {
-                    message:
-                        "Email address already exists",
-                },
-                409
-            );
-        }
-
-        throw error;
+        return json(
+            {
+                message:
+                    "Failed to create mailbox",
+                error:
+                    error?.message ||
+                    String(error),
+            },
+            500
+        );
     }
+
+    return json(
+        {
+            "@type":
+                "Account",
+
+            id:
+                mailbox.id,
+
+            address:
+                mailbox.address,
+        },
+        201
+    );
 }
 
 async function handleSession(
@@ -899,19 +865,6 @@ async function handleSession(
         String(
             payload?.password || ""
         );
-
-    if (
-        !address ||
-        !password
-    ) {
-        return json(
-            {
-                message:
-                    "address and password are required",
-            },
-            400
-        );
-    }
 
     const mailbox =
         await db
@@ -964,10 +917,10 @@ async function handleMessages(
 
     await ensureTables(db);
 
-    const mailboxId =
+    const sessionId =
         getSession(request);
 
-    if (!mailboxId) {
+    if (!sessionId) {
         return json(
             {
                 message:
@@ -980,7 +933,7 @@ async function handleMessages(
     const mailbox =
         await getMailboxById(
             db,
-            mailboxId
+            sessionId
         );
 
     if (!mailbox) {
@@ -998,8 +951,7 @@ async function handleMessages(
     }
 
     if (
-        route ===
-        "/messages"
+        route === "/messages"
     ) {
         const result =
             await db
@@ -1101,7 +1053,8 @@ async function handleMessages(
 
         const recipients =
             safeJsonParse(
-                message.recipients,
+                message.recipients ||
+                    "[]",
                 []
             );
 
@@ -1112,7 +1065,7 @@ async function handleMessages(
             from: {
                 address:
                     message.sender ||
-                    "",
+                    "unknown",
             },
 
             to:
@@ -1204,12 +1157,12 @@ async function handleReceive(
             .split(",")
             .map(
                 (x) =>
-                    x.trim()
+                    x.trim().toLowerCase()
             )
             .filter(Boolean);
 
     if (
-        !recipients.length
+        recipients.length === 0
     ) {
         return json(
             {
@@ -1223,8 +1176,7 @@ async function handleReceive(
     const parsed =
         parseEmail(raw);
 
-    let storedCount =
-        0;
+    let inserted = 0;
 
     for (
         const recipient of recipients
@@ -1278,13 +1230,12 @@ async function handleReceive(
             )
             .run();
 
-        storedCount++;
+        inserted++;
     }
 
     return json({
         ok: true,
-        stored:
-            storedCount,
+        inserted,
     });
 }
 
@@ -1298,10 +1249,7 @@ function getRoute(params) {
         return (
             "/" +
             path
-                .filter(
-                    (part) =>
-                        part !== ""
-                )
+                .filter(Boolean)
                 .join("/")
         );
     }
@@ -1310,18 +1258,7 @@ function getRoute(params) {
         typeof path ===
         "string"
     ) {
-        return (
-            "/" +
-            path
-                .replace(
-                    /^\/+/,
-                    ""
-                )
-                .replace(
-                    /\/+$/,
-                    ""
-                )
-        );
+        return "/" + path;
     }
 
     return "/";
@@ -1337,21 +1274,20 @@ export async function onRequest(
     } = context;
 
     const method =
-        request.method
-            .toUpperCase();
+        request.method;
 
     const route =
         getRoute(params);
 
     try {
         if (
-            method ===
-            "OPTIONS"
+            method === "OPTIONS"
         ) {
             return new Response(
                 null,
                 {
                     status: 204,
+
                     headers: {
                         Allow:
                             "GET, POST, OPTIONS",
@@ -1397,7 +1333,8 @@ export async function onRequest(
         if (
             method === "GET" &&
             (
-                route === "/messages" ||
+                route ===
+                    "/messages" ||
                 route.startsWith(
                     "/messages/"
                 )
@@ -1424,6 +1361,7 @@ export async function onRequest(
             {
                 message:
                     "Route not found",
+
                 route,
             },
             404
