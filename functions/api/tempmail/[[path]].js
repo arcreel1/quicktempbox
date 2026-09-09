@@ -1,37 +1,10 @@
 const DEFAULT_DOMAIN = "outlook.dpdns.org";
-
 const COOKIE_NAME = "tm_session";
 const SESSION_MAX_AGE = 86400;
 
-const TABLES_SQL = `
-CREATE TABLE IF NOT EXISTS mailboxes (
-    id TEXT PRIMARY KEY,
-    address TEXT NOT NULL UNIQUE,
-    local_part TEXT NOT NULL,
-    domain TEXT NOT NULL,
-    password TEXT NOT NULL,
-    created_at TEXT NOT NULL,
-    expires_at TEXT,
-    active INTEGER NOT NULL DEFAULT 1
-);
-
-CREATE TABLE IF NOT EXISTS messages (
-    id TEXT PRIMARY KEY,
-    mailbox_id TEXT NOT NULL,
-    sender TEXT NOT NULL,
-    recipients TEXT NOT NULL,
-    subject TEXT NOT NULL DEFAULT '',
-    intro TEXT NOT NULL DEFAULT '',
-    text TEXT NOT NULL DEFAULT '',
-    html TEXT NOT NULL DEFAULT '',
-    received_at TEXT NOT NULL,
-    seen INTEGER NOT NULL DEFAULT 0,
-    has_attachments INTEGER NOT NULL DEFAULT 0
-);
-
-CREATE INDEX IF NOT EXISTS idx_messages_mailbox
-ON messages(mailbox_id, received_at DESC);
-`;
+// ============================================================
+// JSON Response
+// ============================================================
 
 function json(data, status = 200, extraHeaders = {}) {
     return new Response(
@@ -47,20 +20,42 @@ function json(data, status = 200, extraHeaders = {}) {
     );
 }
 
-function errorResponse(message, status = 500, error = null) {
-    const data = {
-        ok: false,
-        message,
-    };
+// ============================================================
+// Error helpers
+// ============================================================
 
-    if (error) {
-        data.error =
-            error?.message ||
-            String(error);
+function errorMessage(error) {
+    if (!error) {
+        return "Unknown error";
     }
 
-    return json(data, status);
+    if (error instanceof Error) {
+        return error.message || error.toString();
+    }
+
+    if (typeof error === "string") {
+        return error;
+    }
+
+    try {
+        return JSON.stringify(error);
+    } catch {
+        return String(error);
+    }
 }
+
+function detailedError(message, error, extra = {}) {
+    return {
+        ok: false,
+        message,
+        error: errorMessage(error),
+        ...extra,
+    };
+}
+
+// ============================================================
+// Cookies
+// ============================================================
 
 function parseCookies(cookieHeader = "") {
     const cookies = {};
@@ -72,19 +67,15 @@ function parseCookies(cookieHeader = "") {
             continue;
         }
 
-        const key =
-            part.slice(0, index).trim();
-
-        const value =
-            part.slice(index + 1).trim();
+        const key = part.slice(0, index).trim();
+        const value = part.slice(index + 1).trim();
 
         if (!key) {
             continue;
         }
 
         try {
-            cookies[key] =
-                decodeURIComponent(value);
+            cookies[key] = decodeURIComponent(value);
         } catch {
             cookies[key] = value;
         }
@@ -125,6 +116,10 @@ function clearCookie() {
     ].join("; ");
 }
 
+// ============================================================
+// Random
+// ============================================================
+
 function randomString(length = 8) {
     const chars =
         "abcdefghijklmnopqrstuvwxyz0123456789";
@@ -144,81 +139,56 @@ function randomString(length = 8) {
     return result;
 }
 
-function createEmail() {
-    return (
-        randomString(8) +
-        "@" +
-        DEFAULT_DOMAIN
-    );
-}
-
 function now() {
     return new Date().toISOString();
 }
 
-/*
- * D1 binding detection.
- *
- * Your Cloudflare Pages binding should be:
- *
- * Variable name: DB
- * D1 database: quicktempbox
- */
+// ============================================================
+// D1
+// ============================================================
+
 function getDB(env) {
     if (!env) {
-        throw new Error(
-            "Cloudflare env object is missing."
-        );
+        return null;
     }
 
-    if (env.DB) {
-        return env.DB;
-    }
-
-    if (env.D1) {
-        return env.D1;
-    }
-
-    if (env.quicktempbox) {
-        return env.quicktempbox;
-    }
-
-    throw new Error(
-        "D1 binding not found. Cloudflare Pages -> Settings -> Functions -> Bindings -> D1 database -> Variable name must be DB -> Database must be quicktempbox."
+    return (
+        env.DB ||
+        env.D1 ||
+        env.quicktempbox ||
+        null
     );
 }
 
-/*
- * Check that the D1 binding actually works.
- */
-async function verifyDB(db) {
+function checkDB(env) {
+    const db = getDB(env);
+
     if (!db) {
-        throw new Error(
-            "D1 database binding is empty."
-        );
+        return {
+            ok: false,
+            db: null,
+            error:
+                "D1 binding not found. Expected binding name: DB",
+        };
     }
 
-    if (
-        typeof db.prepare !== "function"
-    ) {
-        throw new Error(
-            "The DB binding exists, but it is not a valid D1Database object."
-        );
-    }
-
-    await db
-        .prepare("SELECT 1 AS ok")
-        .first();
+    return {
+        ok: true,
+        db,
+    };
 }
 
-/*
- * Automatically create tables.
- *
- * IMPORTANT:
- * This uses separate statements instead of sending
- * several SQL statements through one D1 prepare().
- */
+// ============================================================
+// Database initialization
+// ============================================================
+
 async function ensureTables(db) {
+    if (!db) {
+        throw new Error(
+            "D1 database binding is missing."
+        );
+    }
+
     await db
         .prepare(
             `
@@ -266,594 +236,42 @@ async function ensureTables(db) {
         .run();
 }
 
-function makeHydra(messages) {
-    return {
-        "hydra:member": messages,
-        "hydra:totalItems": messages.length,
-    };
+// ============================================================
+// Mailbox helpers
+// ============================================================
+
+function normalizeAddress(address) {
+    return String(address || "")
+        .trim()
+        .toLowerCase();
 }
 
-function safeParseRecipients(value) {
-    try {
-        const parsed =
-            JSON.parse(value || "[]");
-
-        return Array.isArray(parsed)
-            ? parsed
-            : [];
-    } catch {
-        return [];
+function isValidAddress(address) {
+    if (!address) {
+        return false;
     }
+
+    if (address.length > 320) {
+        return false;
+    }
+
+    const parts = address.split("@");
+
+    if (parts.length !== 2) {
+        return false;
+    }
+
+    const local = parts[0];
+    const domain = parts[1];
+
+    if (!local || !domain) {
+        return false;
+    }
+
+    return true;
 }
 
-function messageListItem(row) {
-    return {
-        id: row.id,
-
-        from: {
-            address:
-                row.sender || "unknown",
-        },
-
-        to: safeParseRecipients(
-            row.recipients
-        ).map((address) => ({
-            address,
-        })),
-
-        subject:
-            row.subject || "",
-
-        intro:
-            row.intro || "",
-
-        createdAt:
-            row.received_at,
-
-        seen:
-            Boolean(row.seen),
-
-        hasAttachments:
-            Boolean(row.has_attachments),
-    };
-}
-
-/*
- * Base64 UTF-8 decoder.
- */
-function decodeBase64Utf8(value) {
-    try {
-        const cleaned =
-            String(value || "")
-                .replace(/\s/g, "");
-
-        const binary =
-            atob(cleaned);
-
-        const bytes =
-            new Uint8Array(
-                binary.length
-            );
-
-        for (
-            let i = 0;
-            i < binary.length;
-            i++
-        ) {
-            bytes[i] =
-                binary.charCodeAt(i);
-        }
-
-        return new TextDecoder(
-            "utf-8"
-        ).decode(bytes);
-    } catch {
-        return value || "";
-    }
-}
-
-/*
- * Quoted-printable decoder.
- */
-function decodeQuotedPrintable(value) {
-    return String(value || "")
-        .replace(/=\r?\n/g, "")
-        .replace(
-            /=([0-9A-Fa-f]{2})/g,
-            (_, hex) =>
-                String.fromCharCode(
-                    parseInt(hex, 16)
-                )
-        );
-}
-
-/*
- * Decode MIME encoded words.
- *
- * Supports:
- * =?UTF-8?B?...?=
- * =?UTF-8?Q?...?=
- * =?GB2312?B?...?=
- * =?GBK?B?...?=
- */
-function decodeMimeWord(value) {
-    if (!value) {
-        return "";
-    }
-
-    return String(value).replace(
-        /=\?([^?]+)\?([bBqQ])\?([^?]+)\?=/g,
-        (
-            _match,
-            charset,
-            encoding,
-            content
-        ) => {
-            try {
-                const normalizedCharset =
-                    String(charset)
-                        .toLowerCase();
-
-                let decoderCharset =
-                    "utf-8";
-
-                if (
-                    normalizedCharset.includes(
-                        "gb"
-                    )
-                ) {
-                    decoderCharset =
-                        "gb18030";
-                }
-
-                if (
-                    encoding.toLowerCase() ===
-                    "b"
-                ) {
-                    const binary =
-                        atob(content);
-
-                    const bytes =
-                        new Uint8Array(
-                            binary.length
-                        );
-
-                    for (
-                        let i = 0;
-                        i < binary.length;
-                        i++
-                    ) {
-                        bytes[i] =
-                            binary.charCodeAt(i);
-                    }
-
-                    return new TextDecoder(
-                        decoderCharset
-                    ).decode(bytes);
-                }
-
-                const decoded =
-                    content
-                        .replace(
-                            /_/g,
-                            " "
-                        )
-                        .replace(
-                            /=([0-9A-Fa-f]{2})/g,
-                            (_, hex) =>
-                                String.fromCharCode(
-                                    parseInt(
-                                        hex,
-                                        16
-                                    )
-                                )
-                        );
-
-                return decoded;
-            } catch {
-                return content;
-            }
-        }
-    );
-}
-
-/*
- * Read a MIME header including folded lines.
- */
-function getHeader(raw, name) {
-    const escapedName =
-        name.replace(
-            /[.*+?^${}()|[\]\\]/g,
-            "\\$&"
-        );
-
-    const regex =
-        new RegExp(
-            `^${escapedName}:\\s*(.*(?:\\r?\\n[ \\t]+.*)*)$`,
-            "im"
-        );
-
-    const match =
-        raw.match(regex);
-
-    if (!match) {
-        return "";
-    }
-
-    return match[1]
-        .replace(
-            /\r?\n[ \t]+/g,
-            " "
-        )
-        .trim();
-}
-
-/*
- * Separate MIME headers and body.
- */
-function extractMimeBody(raw) {
-    const separator =
-        raw.match(/\r?\n\r?\n/);
-
-    if (!separator) {
-        return {
-            headers: raw,
-            body: "",
-        };
-    }
-
-    const index =
-        separator.index;
-
-    return {
-        headers:
-            raw.slice(0, index),
-
-        body:
-            raw.slice(
-                index +
-                    separator[0].length
-            ),
-    };
-}
-
-/*
- * Remove HTML to produce readable text.
- */
-function htmlToText(html) {
-    if (!html) {
-        return "";
-    }
-
-    return String(html)
-        .replace(
-            /<style[\s\S]*?<\/style>/gi,
-            ""
-        )
-        .replace(
-            /<script[\s\S]*?<\/script>/gi,
-            ""
-        )
-        .replace(
-            /<br\s*\/?>/gi,
-            "\n"
-        )
-        .replace(
-            /<\/p>/gi,
-            "\n"
-        )
-        .replace(
-            /<\/div>/gi,
-            "\n"
-        )
-        .replace(
-            /<[^>]+>/g,
-            " "
-        )
-        .replace(
-            /&nbsp;/gi,
-            " "
-        )
-        .replace(
-            /&amp;/gi,
-            "&"
-        )
-        .replace(
-            /&lt;/gi,
-            "<"
-        )
-        .replace(
-            /&gt;/gi,
-            ">"
-        )
-        .replace(
-            /\r/g,
-            ""
-        )
-        .replace(
-            /[ \t]+\n/g,
-            "\n"
-        )
-        .replace(
-            /\n{3,}/g,
-            "\n\n"
-        )
-        .trim();
-}
-
-/*
- * Decode one MIME part.
- */
-function decodeMimePart(
-    headers,
-    body
-) {
-    const encoding =
-        getHeader(
-            headers,
-            "Content-Transfer-Encoding"
-        );
-
-    let decoded =
-        body || "";
-
-    if (
-        /base64/i.test(
-            encoding
-        )
-    ) {
-        decoded =
-            decodeBase64Utf8(
-                decoded
-            );
-    } else if (
-        /quoted-printable/i.test(
-            encoding
-        )
-    ) {
-        decoded =
-            decodeQuotedPrintable(
-                decoded
-            );
-    }
-
-    return decoded;
-}
-
-/*
- * Parse an incoming email.
- */
-function parseEmail(rawEmail) {
-    const raw =
-        String(rawEmail || "");
-
-    const {
-        headers,
-        body,
-    } = extractMimeBody(raw);
-
-    const subject =
-        decodeMimeWord(
-            getHeader(
-                headers,
-                "Subject"
-            )
-        );
-
-    const contentType =
-        getHeader(
-            headers,
-            "Content-Type"
-        );
-
-    const transferEncoding =
-        getHeader(
-            headers,
-            "Content-Transfer-Encoding"
-        );
-
-    /*
-     * Non-multipart message.
-     */
-    if (
-        !/multipart\//i.test(
-            contentType
-        )
-    ) {
-        let decodedBody =
-            body;
-
-        if (
-            /base64/i.test(
-                transferEncoding
-            )
-        ) {
-            decodedBody =
-                decodeBase64Utf8(
-                    body
-                );
-        } else if (
-            /quoted-printable/i.test(
-                transferEncoding
-            )
-        ) {
-            decodedBody =
-                decodeQuotedPrintable(
-                    body
-                );
-        }
-
-        const isHtml =
-            /text\/html/i.test(
-                contentType
-            );
-
-        const text =
-            isHtml
-                ? htmlToText(
-                    decodedBody
-                )
-                : decodedBody;
-
-        const html =
-            isHtml
-                ? decodedBody
-                : "";
-
-        return {
-            subject:
-                subject || "",
-
-            text:
-                text || "",
-
-            html:
-                html || "",
-
-            intro:
-                String(text || "")
-                    .replace(
-                        /\s+/g,
-                        " "
-                    )
-                    .trim()
-                    .slice(0, 200),
-        };
-    }
-
-    /*
-     * Multipart message.
-     */
-    const boundaryMatch =
-        contentType.match(
-            /boundary\s*=\s*(?:"([^"]+)"|([^;]+))/i
-        );
-
-    if (!boundaryMatch) {
-        return {
-            subject:
-                subject || "",
-
-            text:
-                body || "",
-
-            html:
-                "",
-
-            intro:
-                String(body || "")
-                    .replace(
-                        /\s+/g,
-                        " "
-                    )
-                    .trim()
-                    .slice(0, 200),
-        };
-    }
-
-    const boundary =
-        (
-            boundaryMatch[1] ||
-            boundaryMatch[2] ||
-            ""
-        ).trim();
-
-    const parts =
-        body.split(
-            `--${boundary}`
-        );
-
-    let text = "";
-    let html = "";
-
-    for (const part of parts) {
-        if (
-            part.trim() ===
-            "--"
-        ) {
-            continue;
-        }
-
-        const {
-            headers:
-                partHeaders,
-            body:
-                partBody,
-        } =
-            extractMimeBody(
-                part
-            );
-
-        if (
-            !partHeaders
-        ) {
-            continue;
-        }
-
-        const decoded =
-            decodeMimePart(
-                partHeaders,
-                partBody
-            ).trim();
-
-        if (
-            /text\/plain/i.test(
-                partHeaders
-            )
-        ) {
-            if (!text) {
-                text =
-                    decoded;
-            }
-        }
-
-        if (
-            /text\/html/i.test(
-                partHeaders
-            )
-        ) {
-            if (!html) {
-                html =
-                    decoded;
-            }
-        }
-    }
-
-    if (
-        !text &&
-        html
-    ) {
-        text =
-            htmlToText(
-                html
-            );
-    }
-
-    return {
-        subject:
-            subject || "",
-
-        text:
-            text || "",
-
-        html:
-            html || "",
-
-        intro:
-            String(text || "")
-                .replace(
-                    /\s+/g,
-                    " "
-                )
-                .trim()
-                .slice(0, 200),
-    };
-}
-
-async function getMailbox(
-    db,
-    address
-) {
+async function getMailbox(db, address) {
     return await db
         .prepare(
             `
@@ -868,10 +286,7 @@ async function getMailbox(
         .first();
 }
 
-async function getMailboxById(
-    db,
-    id
-) {
+async function getMailboxById(db, id) {
     return await db
         .prepare(
             `
@@ -886,48 +301,24 @@ async function getMailboxById(
         .first();
 }
 
-/*
- * Create mailbox with retry.
- *
- * The frontend normally generates its own address.
- * If the address already exists, return 409.
- */
 async function createMailbox(
     db,
     address,
     password
 ) {
-    const id =
-        crypto.randomUUID();
+    const id = crypto.randomUUID();
 
-    const atIndex =
-        address.lastIndexOf("@");
+    const parts = address.split("@");
 
-    const localPart =
-        atIndex > 0
-            ? address.slice(
-                0,
-                atIndex
-            )
-            : address;
+    const localPart = parts[0];
+    const domain = parts[1];
 
-    const domain =
-        atIndex > 0
-            ? address.slice(
-                atIndex + 1
-            )
-            : DEFAULT_DOMAIN;
-
-    const createdAt =
-        now();
+    const createdAt = now();
 
     const expiresAt =
         new Date(
             Date.now() +
-                24 *
-                    60 *
-                    60 *
-                    1000
+            24 * 60 * 60 * 1000
         ).toISOString();
 
     try {
@@ -960,10 +351,7 @@ async function createMailbox(
             .run();
     } catch (error) {
         throw new Error(
-            `D1 mailbox INSERT failed: ${
-                error?.message ||
-                String(error)
-            }`
+            `Mailbox INSERT failed: ${errorMessage(error)}`
         );
     }
 
@@ -971,157 +359,171 @@ async function createMailbox(
         id,
         address,
         password,
+        createdAt,
+        expiresAt,
     };
 }
 
-/*
- * GET /domains
- */
+// ============================================================
+// /domains
+// ============================================================
+
 async function handleDomains() {
     return json({
-        "@context":
-            "/contexts/Domain",
-
-        "@id":
-            "/domains",
-
-        "@type":
-            "hydra:Collection",
-
-        "hydra:totalItems":
-            1,
-
+        "@context": "/contexts/Domain",
+        "@id": "/domains",
+        "@type": "hydra:Collection",
+        "hydra:totalItems": 1,
         "hydra:member": [
             {
                 "@id":
                     `/domains/${DEFAULT_DOMAIN}`,
-
-                "@type":
-                    "Domain",
-
-                id:
-                    DEFAULT_DOMAIN,
-
-                domain:
-                    DEFAULT_DOMAIN,
-
-                isActive:
-                    true,
-
-                isPrivate:
-                    false,
+                "@type": "Domain",
+                id: DEFAULT_DOMAIN,
+                domain: DEFAULT_DOMAIN,
+                isActive: true,
+                isPrivate: false,
             },
         ],
     });
 }
 
-/*
- * POST /accounts
- */
+// ============================================================
+// /accounts
+// ============================================================
+
 async function handleCreateAccount(
     request,
     env
 ) {
-    let db;
+    const dbCheck = checkDB(env);
+
+    if (!dbCheck.ok) {
+        return json(
+            detailedError(
+                "D1 binding error",
+                dbCheck.error,
+                {
+                    expectedBinding: "DB",
+                    hint:
+                        "Cloudflare Pages > Settings > Functions > Bindings > D1 Database > DB > quicktempbox",
+                }
+            ),
+            500
+        );
+    }
+
+    const db = dbCheck.db;
 
     try {
-        db =
-            getDB(env);
-
-        await verifyDB(db);
-
         await ensureTables(db);
     } catch (error) {
-        console.error(
-            "D1 initialization error:",
-            error
-        );
-
-        return errorResponse(
-            "D1 database initialization failed",
-            500,
-            error
+        return json(
+            detailedError(
+                "Failed to initialize D1 database",
+                error
+            ),
+            500
         );
     }
 
     let payload;
 
     try {
-        payload =
-            await request.json();
-    } catch {
-        return errorResponse(
-            "Invalid JSON body",
+        payload = await request.json();
+    } catch (error) {
+        return json(
+            detailedError(
+                "Invalid JSON body",
+                error
+            ),
             400
         );
     }
 
-    let address =
-        String(
-            payload?.address || ""
-        )
-            .trim()
-            .toLowerCase();
+    const address =
+        normalizeAddress(
+            payload?.address
+        );
 
-    let password =
+    const password =
         String(
             payload?.password || ""
         );
 
-    /*
-     * Allow the backend to generate an address
-     * if the client doesn't provide one.
-     */
-    if (!address) {
-        address =
-            createEmail();
+    if (!address || !password) {
+        return json(
+            {
+                ok: false,
+                message:
+                    "address and password are required",
+            },
+            400
+        );
     }
 
-    if (!password) {
-        password =
-            randomString(16);
+    if (!isValidAddress(address)) {
+        return json(
+            {
+                ok: false,
+                message:
+                    "Invalid email address format",
+                address,
+            },
+            422
+        );
     }
 
     const expectedSuffix =
         `@${DEFAULT_DOMAIN}`;
 
-    if (
-        !address.endsWith(
-            expectedSuffix
-        )
-    ) {
-        return errorResponse(
-            `Only ${DEFAULT_DOMAIN} is supported`,
+    if (!address.endsWith(expectedSuffix)) {
+        return json(
+            {
+                ok: false,
+                message:
+                    `Only ${DEFAULT_DOMAIN} is supported`,
+                expectedDomain:
+                    DEFAULT_DOMAIN,
+                receivedAddress:
+                    address,
+            },
             422
         );
     }
 
+    // 防止 local part 为空
     const localPart =
         address.slice(
             0,
             -expectedSuffix.length
         );
 
-    if (
-        !localPart ||
-        localPart.length < 1 ||
-        localPart.length > 64
-    ) {
-        return errorResponse(
-            "Invalid email local part",
+    if (!localPart) {
+        return json(
+            {
+                ok: false,
+                message:
+                    "Email local part cannot be empty",
+            },
             422
         );
     }
 
-    /*
-     * Prevent duplicate addresses.
-     */
+    // 防止重复邮箱
+    let existing;
+
     try {
-        const existing =
+        existing =
             await db
                 .prepare(
                     `
-                    SELECT id, active
+                    SELECT
+                        id,
+                        address,
+                        active,
+                        created_at,
+                        expires_at
                     FROM mailboxes
                     WHERE lower(address) = lower(?)
                     LIMIT 1
@@ -1129,130 +531,146 @@ async function handleCreateAccount(
                 )
                 .bind(address)
                 .first();
-
-        if (existing) {
-            return errorResponse(
-                "Email address already exists",
-                409
-            );
-        }
     } catch (error) {
-        console.error(
-            "Duplicate check failed:",
-            error
-        );
-
-        return errorResponse(
-            "Failed to check mailbox",
-            500,
-            error
+        return json(
+            detailedError(
+                "Failed to check existing mailbox",
+                error,
+                {
+                    address,
+                }
+            ),
+            500
         );
     }
 
+    if (existing) {
+        return json(
+            {
+                ok: false,
+                message:
+                    "Email address already exists",
+                mailbox: existing,
+            },
+            409
+        );
+    }
+
+    let mailbox;
+
     try {
-        const mailbox =
+        mailbox =
             await createMailbox(
                 db,
                 address,
                 password
             );
-
-        return json(
-            {
-                "@type":
-                    "Account",
-
-                id:
-                    mailbox.id,
-
-                address:
-                    mailbox.address,
-            },
-            201
-        );
     } catch (error) {
-        console.error(
-            "Mailbox creation failed:",
-            error
-        );
-
-        /*
-         * Give the browser the real D1 error.
-         * This makes debugging much easier.
-         */
-        return errorResponse(
-            "Failed to create mailbox",
-            500,
-            error
+        return json(
+            detailedError(
+                "Failed to create mailbox",
+                error,
+                {
+                    address,
+                    domain:
+                        DEFAULT_DOMAIN,
+                    hint:
+                        "Check D1 binding DB and the mailboxes table.",
+                }
+            ),
+            500
         );
     }
+
+    return json(
+        {
+            "@type": "Account",
+            ok: true,
+            id: mailbox.id,
+            address: mailbox.address,
+            expiresAt:
+                mailbox.expiresAt,
+        },
+        201
+    );
 }
 
-/*
- * POST /session
- */
+// ============================================================
+// /session
+// ============================================================
+
 async function handleSession(
     request,
     env
 ) {
-    let db;
+    const dbCheck = checkDB(env);
+
+    if (!dbCheck.ok) {
+        return json(
+            detailedError(
+                "D1 binding error",
+                dbCheck.error,
+                {
+                    expectedBinding: "DB",
+                }
+            ),
+            500
+        );
+    }
+
+    const db = dbCheck.db;
 
     try {
-        db =
-            getDB(env);
-
-        await verifyDB(db);
-
         await ensureTables(db);
     } catch (error) {
-        console.error(
-            "Session D1 error:",
-            error
-        );
-
-        return errorResponse(
-            "D1 database initialization failed",
-            500,
-            error
+        return json(
+            detailedError(
+                "Failed to initialize D1 database",
+                error
+            ),
+            500
         );
     }
 
     let payload;
 
     try {
-        payload =
-            await request.json();
-    } catch {
-        return errorResponse(
-            "Invalid JSON body",
+        payload = await request.json();
+    } catch (error) {
+        return json(
+            detailedError(
+                "Invalid JSON body",
+                error
+            ),
             400
         );
     }
 
     const address =
-        String(
-            payload?.address || ""
-        )
-            .trim()
-            .toLowerCase();
+        normalizeAddress(
+            payload?.address
+        );
 
     const password =
         String(
             payload?.password || ""
         );
 
-    if (
-        !address ||
-        !password
-    ) {
-        return errorResponse(
-            "address and password are required",
+    if (!address || !password) {
+        return json(
+            {
+                ok: false,
+                message:
+                    "address and password are required",
+            },
             400
         );
     }
 
+    let mailbox;
+
     try {
-        const mailbox =
+        mailbox =
             await db
                 .prepare(
                     `
@@ -1265,110 +683,151 @@ async function handleSession(
                 )
                 .bind(address)
                 .first();
+    } catch (error) {
+        return json(
+            detailedError(
+                "Failed to query mailbox",
+                error,
+                {
+                    address,
+                }
+            ),
+            500
+        );
+    }
 
-        if (
-            !mailbox ||
-            mailbox.password !==
-                password
-        ) {
-            return errorResponse(
-                "Invalid credentials",
-                401
-            );
-        }
-
-        /*
-         * Expiration check.
-         */
-        if (
-            mailbox.expires_at &&
-            new Date(
-                mailbox.expires_at
-            ).getTime() <
-                Date.now()
-        ) {
-            await db
-                .prepare(
-                    `
-                    UPDATE mailboxes
-                    SET active = 0
-                    WHERE id = ?
-                    `
-                )
-                .bind(
-                    mailbox.id
-                )
-                .run();
-
-            return errorResponse(
-                "Mailbox expired",
-                401
-            );
-        }
-
+    if (!mailbox) {
         return json(
             {
-                ok: true,
+                ok: false,
+                message:
+                    "Mailbox not found",
+                address,
             },
-            200,
-            {
-                "Set-Cookie":
-                    sessionCookie(
-                        mailbox.id
-                    ),
-            }
+            401
         );
-    } catch (error) {
-        console.error(
-            "Session query failed:",
-            error
-        );
+    }
 
-        return errorResponse(
-            "Failed to create session",
-            500,
-            error
+    if (mailbox.password !== password) {
+        return json(
+            {
+                ok: false,
+                message:
+                    "Invalid password",
+            },
+            401
         );
+    }
+
+    return json(
+        {
+            ok: true,
+            id: mailbox.id,
+            address: mailbox.address,
+        },
+        200,
+        {
+            "Set-Cookie":
+                sessionCookie(
+                    mailbox.id
+                ),
+        }
+    );
+}
+
+// ============================================================
+// Message list formatter
+// ============================================================
+
+function safeRecipients(value) {
+    try {
+        const parsed =
+            JSON.parse(value || "[]");
+
+        return Array.isArray(parsed)
+            ? parsed
+            : [];
+    } catch {
+        return [];
     }
 }
 
-/*
- * GET /messages
- * GET /messages/:id
- */
+function messageListItem(row) {
+    return {
+        id: row.id,
+        from: {
+            address:
+                row.sender ||
+                "unknown",
+        },
+        to: safeRecipients(
+            row.recipients
+        ).map(
+            (address) => ({
+                address,
+            })
+        ),
+        subject:
+            row.subject || "",
+        intro:
+            row.intro || "",
+        createdAt:
+            row.received_at,
+        seen:
+            Boolean(row.seen),
+        hasAttachments:
+            Boolean(
+                row.has_attachments
+            ),
+    };
+}
+
+// ============================================================
+// /messages
+// /messages/:id
+// ============================================================
+
 async function handleMessages(
     request,
     env,
     route
 ) {
-    let db;
+    const dbCheck = checkDB(env);
 
-    try {
-        db =
-            getDB(env);
-
-        await verifyDB(db);
-
-        await ensureTables(db);
-    } catch (error) {
-        console.error(
-            "Messages D1 error:",
-            error
-        );
-
-        return errorResponse(
-            "D1 database initialization failed",
-            500,
-            error
+    if (!dbCheck.ok) {
+        return json(
+            detailedError(
+                "D1 binding error",
+                dbCheck.error
+            ),
+            500
         );
     }
 
-    const mailboxId =
+    const db = dbCheck.db;
+
+    try {
+        await ensureTables(db);
+    } catch (error) {
+        return json(
+            detailedError(
+                "Failed to initialize D1 database",
+                error
+            ),
+            500
+        );
+    }
+
+    const sessionId =
         getSession(request);
 
-    if (!mailboxId) {
-        return errorResponse(
-            "Not authenticated",
+    if (!sessionId) {
+        return json(
+            {
+                ok: false,
+                message:
+                    "Not authenticated",
+            },
             401
         );
     }
@@ -1379,24 +838,22 @@ async function handleMessages(
         mailbox =
             await getMailboxById(
                 db,
-                mailboxId
+                sessionId
             );
     } catch (error) {
-        console.error(
-            "Mailbox session lookup failed:",
-            error
-        );
-
-        return errorResponse(
-            "Failed to validate session",
-            500,
-            error
+        return json(
+            detailedError(
+                "Failed to validate session",
+                error
+            ),
+            500
         );
     }
 
     if (!mailbox) {
         return json(
             {
+                ok: false,
                 message:
                     "Session expired",
             },
@@ -1408,53 +865,11 @@ async function handleMessages(
         );
     }
 
-    if (
-        mailbox.expires_at &&
-        new Date(
-            mailbox.expires_at
-        ).getTime() <
-            Date.now()
-    ) {
-        try {
-            await db
-                .prepare(
-                    `
-                    UPDATE mailboxes
-                    SET active = 0
-                    WHERE id = ?
-                    `
-                )
-                .bind(
-                    mailbox.id
-                )
-                .run();
-        } catch (error) {
-            console.error(
-                "Mailbox expiration update failed:",
-                error
-            );
-        }
+    // --------------------------------------------------------
+    // GET /messages
+    // --------------------------------------------------------
 
-        return json(
-            {
-                message:
-                    "Session expired",
-            },
-            401,
-            {
-                "Set-Cookie":
-                    clearCookie(),
-            }
-        );
-    }
-
-    /*
-     * GET /messages
-     */
-    if (
-        route ===
-        "/messages"
-    ) {
+    if (route === "/messages") {
         try {
             const result =
                 await db
@@ -1480,35 +895,42 @@ async function handleMessages(
                     messageListItem
                 );
 
-            return json(
-                makeHydra(
-                    messages
-                )
-            );
+            return json({
+                "@context":
+                    "/contexts/Message",
+                "@id":
+                    "/messages",
+                "@type":
+                    "hydra:Collection",
+                "hydra:member":
+                    messages,
+                "hydra:totalItems":
+                    messages.length,
+            });
         } catch (error) {
-            console.error(
-                "Messages list query failed:",
-                error
-            );
-
-            return errorResponse(
-                "Failed to load messages",
-                500,
-                error
+            return json(
+                detailedError(
+                    "Failed to load messages",
+                    error,
+                    {
+                        mailboxId:
+                            mailbox.id,
+                    }
+                ),
+                500
             );
         }
     }
 
-    /*
-     * GET /messages/:id
-     */
+    // --------------------------------------------------------
+    // GET /messages/:id
+    // --------------------------------------------------------
+
     const prefix =
         "/messages/";
 
     if (
-        route.startsWith(
-            prefix
-        )
+        route.startsWith(prefix)
     ) {
         const id =
             decodeURIComponent(
@@ -1518,14 +940,20 @@ async function handleMessages(
             );
 
         if (!id) {
-            return errorResponse(
-                "Message ID is required",
+            return json(
+                {
+                    ok: false,
+                    message:
+                        "Message ID is required",
+                },
                 400
             );
         }
 
+        let message;
+
         try {
-            const message =
+            message =
                 await db
                     .prepare(
                         `
@@ -1541,14 +969,32 @@ async function handleMessages(
                         mailbox.id
                     )
                     .first();
+        } catch (error) {
+            return json(
+                detailedError(
+                    "Failed to load message",
+                    error,
+                    {
+                        messageId:
+                            id,
+                    }
+                ),
+                500
+            );
+        }
 
-            if (!message) {
-                return errorResponse(
-                    "Message not found",
-                    404
-                );
-            }
+        if (!message) {
+            return json(
+                {
+                    ok: false,
+                    message:
+                        "Message not found",
+                },
+                404
+            );
+        }
 
+        try {
             await db
                 .prepare(
                     `
@@ -1563,79 +1009,66 @@ async function handleMessages(
                     mailbox.id
                 )
                 .run();
-
-            return json({
-                id:
-                    message.id,
-
-                from: {
-                    address:
-                        message.sender,
-                },
-
-                to:
-                    safeParseRecipients(
-                        message.recipients
-                    ).map(
-                        (address) => ({
-                            address,
-                        })
-                    ),
-
-                subject:
-                    message.subject ||
-                    "",
-
-                intro:
-                    message.intro ||
-                    "",
-
-                text:
-                    message.text ||
-                    "",
-
-                html:
-                    message.html ||
-                    "",
-
-                createdAt:
-                    message.received_at,
-
-                seen:
-                    true,
-
-                hasAttachments:
-                    Boolean(
-                        message.has_attachments
-                    ),
-            });
         } catch (error) {
             console.error(
-                "Message detail query failed:",
-                error
-            );
-
-            return errorResponse(
-                "Failed to load message",
-                500,
+                "Failed to mark message as read:",
                 error
             );
         }
+
+        return json({
+            id: message.id,
+            from: {
+                address:
+                    message.sender ||
+                    "unknown",
+            },
+            to: safeRecipients(
+                message.recipients
+            ).map(
+                (address) => ({
+                    address,
+                })
+            ),
+            subject:
+                message.subject || "",
+            intro:
+                message.intro || "",
+            text:
+                message.text || "",
+            html:
+                message.html || "",
+            createdAt:
+                message.received_at,
+            seen: true,
+            hasAttachments:
+                Boolean(
+                    message.has_attachments
+                ),
+        });
     }
 
-    return errorResponse(
-        "Route not found",
+    return json(
+        {
+            ok: false,
+            message:
+                "Route not found",
+            route,
+        },
         404
     );
 }
 
-/*
- * POST /logout
- */
+// ============================================================
+// /logout
+// ============================================================
+
 async function handleLogout() {
     return json(
         {
             ok: true,
+            message:
+                "Logged out",
         },
         200,
         {
@@ -1645,43 +1078,454 @@ async function handleLogout() {
     );
 }
 
-/*
- * POST /receive
- *
- * Your mail receiving system should POST
- * the raw email here.
- *
- * Headers:
- *
- * X-Email-From
- * X-Email-To
- *
- * Body:
- * raw MIME email
- */
+// ============================================================
+// MIME decoding
+// ============================================================
+
+function decodeBase64Utf8(value) {
+    try {
+        const cleaned =
+            String(value || "")
+                .replace(/\s/g, "");
+
+        const binary =
+            atob(cleaned);
+
+        const bytes =
+            new Uint8Array(
+                binary.length
+            );
+
+        for (
+            let i = 0;
+            i < binary.length;
+            i++
+        ) {
+            bytes[i] =
+                binary.charCodeAt(i);
+        }
+
+        return new TextDecoder(
+            "utf-8"
+        ).decode(bytes);
+    } catch {
+        return value;
+    }
+}
+
+function decodeQuotedPrintable(
+    value
+) {
+    return String(value || "")
+        .replace(
+            /=\r?\n/g,
+            ""
+        )
+        .replace(
+            /=([0-9A-Fa-f]{2})/g,
+            (_, hex) =>
+                String.fromCharCode(
+                    parseInt(
+                        hex,
+                        16
+                    )
+                )
+        );
+}
+
+function decodeMimeWord(value) {
+    if (!value) {
+        return "";
+    }
+
+    return String(value).replace(
+        /=\?([^?]+)\?([bBqQ])\?([^?]+)\?=/g,
+        (
+            _,
+            charset,
+            encoding,
+            content
+        ) => {
+            try {
+                if (
+                    encoding.toLowerCase() ===
+                    "b"
+                ) {
+                    const binary =
+                        atob(
+                            content
+                        );
+
+                    const bytes =
+                        new Uint8Array(
+                            binary.length
+                        );
+
+                    for (
+                        let i = 0;
+                        i < binary.length;
+                        i++
+                    ) {
+                        bytes[i] =
+                            binary.charCodeAt(
+                                i
+                            );
+                    }
+
+                    const decoderCharset =
+                        charset
+                            .toLowerCase()
+                            .includes("gb")
+                            ? "gb18030"
+                            : "utf-8";
+
+                    return new TextDecoder(
+                        decoderCharset
+                    ).decode(
+                        bytes
+                    );
+                }
+
+                return content
+                    .replace(
+                        /_/g,
+                        " "
+                    )
+                    .replace(
+                        /=([0-9A-Fa-f]{2})/g,
+                        (
+                            _,
+                            hex
+                        ) =>
+                            String.fromCharCode(
+                                parseInt(
+                                    hex,
+                                    16
+                                )
+                            )
+                    );
+            } catch {
+                return content;
+            }
+        }
+    );
+}
+
+// ============================================================
+// MIME headers
+// ============================================================
+
+function getHeader(
+    raw,
+    name
+) {
+    const regex =
+        new RegExp(
+            `^${name}:\\s*(.*(?:\\r?\\n[ \\t]+.*)*)$`,
+            "im"
+        );
+
+    const match =
+        String(raw || "").match(
+            regex
+        );
+
+    if (!match) {
+        return "";
+    }
+
+    return match[1]
+        .replace(
+            /\r?\n[ \t]+/g,
+            " "
+        )
+        .trim();
+}
+
+function extractMimeBody(rawEmail) {
+    const raw =
+        String(rawEmail || "");
+
+    const headerEnd =
+        raw.search(
+            /\r?\n\r?\n/
+        );
+
+    if (
+        headerEnd === -1
+    ) {
+        return {
+            headers: raw,
+            body: "",
+        };
+    }
+
+    const separator =
+        raw.match(
+            /\r?\n\r?\n/
+        );
+
+    return {
+        headers:
+            raw.slice(
+                0,
+                headerEnd
+            ),
+        body:
+            raw.slice(
+                headerEnd +
+                    separator[0]
+                        .length
+            ),
+    };
+}
+
+// ============================================================
+// MIME parser
+// ============================================================
+
+function parseEmail(rawEmail) {
+    const {
+        headers,
+        body,
+    } =
+        extractMimeBody(
+            rawEmail
+        );
+
+    let subject =
+        decodeMimeWord(
+            getHeader(
+                headers,
+                "Subject"
+            )
+        );
+
+    const contentType =
+        getHeader(
+            headers,
+            "Content-Type"
+        );
+
+    const transferEncoding =
+        getHeader(
+            headers,
+            "Content-Transfer-Encoding"
+        );
+
+    let decodedBody =
+        body;
+
+    if (
+        /base64/i.test(
+            transferEncoding
+        )
+    ) {
+        decodedBody =
+            decodeBase64Utf8(
+                body
+            );
+    } else if (
+        /quoted-printable/i.test(
+            transferEncoding
+        )
+    ) {
+        decodedBody =
+            decodeQuotedPrintable(
+                body
+            );
+    }
+
+    let text =
+        decodedBody;
+
+    let html = "";
+
+    // --------------------------------------------------------
+    // multipart/alternative
+    // --------------------------------------------------------
+
+    if (
+        /multipart\/alternative/i.test(
+            contentType
+        )
+    ) {
+        const boundaryMatch =
+            contentType.match(
+                /boundary="?([^";]+)"?/i
+            );
+
+        if (
+            boundaryMatch
+        ) {
+            const boundary =
+                boundaryMatch[1];
+
+            const parts =
+                decodedBody.split(
+                    `--${boundary}`
+                );
+
+            for (
+                const part of parts
+            ) {
+                const partHeaderEnd =
+                    part.search(
+                        /\r?\n\r?\n/
+                    );
+
+                if (
+                    partHeaderEnd === -1
+                ) {
+                    continue;
+                }
+
+                const separator =
+                    part.match(
+                        /\r?\n\r?\n/
+                    );
+
+                const partHeaders =
+                    part.slice(
+                        0,
+                        partHeaderEnd
+                    );
+
+                let partBody =
+                    part.slice(
+                        partHeaderEnd +
+                            separator[0]
+                                .length
+                    );
+
+                const partEncoding =
+                    getHeader(
+                        partHeaders,
+                        "Content-Transfer-Encoding"
+                    );
+
+                if (
+                    /base64/i.test(
+                        partEncoding
+                    )
+                ) {
+                    partBody =
+                        decodeBase64Utf8(
+                            partBody
+                        );
+                } else if (
+                    /quoted-printable/i.test(
+                        partEncoding
+                    )
+                ) {
+                    partBody =
+                        decodeQuotedPrintable(
+                            partBody
+                        );
+                }
+
+                if (
+                    /text\/html/i.test(
+                        partHeaders
+                    )
+                ) {
+                    html =
+                        partBody.trim();
+                }
+
+                if (
+                    /text\/plain/i.test(
+                        partHeaders
+                    )
+                ) {
+                    text =
+                        partBody.trim();
+                }
+            }
+        }
+    }
+
+    // --------------------------------------------------------
+    // HTML fallback
+    // --------------------------------------------------------
+
+    if (
+        !text &&
+        html
+    ) {
+        text =
+            html
+                .replace(
+                    /<style[\s\S]*?<\/style>/gi,
+                    ""
+                )
+                .replace(
+                    /<script[\s\S]*?<\/script>/gi,
+                    ""
+                )
+                .replace(
+                    /<[^>]+>/g,
+                    " "
+                )
+                .replace(
+                    /\s+/g,
+                    " "
+                )
+                .trim();
+    }
+
+    return {
+        subject:
+            subject || "",
+        text:
+            text || "",
+        html:
+            html || "",
+        intro:
+            (text || "")
+                .replace(
+                    /\s+/g,
+                    " "
+                )
+                .trim()
+                .slice(
+                    0,
+                    200
+                ),
+    };
+}
+
+// ============================================================
+// /receive
+// ============================================================
+
 async function handleReceive(
     request,
     env
 ) {
-    let db;
+    const dbCheck = checkDB(env);
+
+    if (!dbCheck.ok) {
+        return json(
+            detailedError(
+                "D1 binding error",
+                dbCheck.error
+            ),
+            500
+        );
+    }
+
+    const db = dbCheck.db;
 
     try {
-        db =
-            getDB(env);
-
-        await verifyDB(db);
-
         await ensureTables(db);
     } catch (error) {
-        console.error(
-            "Receive D1 error:",
-            error
-        );
-
-        return errorResponse(
-            "D1 database initialization failed",
-            500,
-            error
+        return json(
+            detailedError(
+                "Failed to initialize D1 database",
+                error
+            ),
+            500
         );
     }
 
@@ -1703,76 +1547,82 @@ async function handleReceive(
             .split(",")
             .map(
                 (x) =>
-                    x.trim().toLowerCase()
+                    normalizeAddress(
+                        x
+                    )
             )
             .filter(Boolean);
 
     if (
         !recipients.length
     ) {
-        return errorResponse(
-            "Missing recipient",
+        return json(
+            {
+                ok: false,
+                message:
+                    "Missing recipient",
+                hint:
+                    "Send recipient in X-Email-To header.",
+            },
             400
         );
     }
 
-    /*
-     * Only accept our domain.
-     */
-    const validRecipients =
-        recipients.filter(
-            (address) =>
-                address.endsWith(
-                    `@${DEFAULT_DOMAIN}`
-                )
-        );
+    let parsed;
 
-    if (
-        !validRecipients.length
-    ) {
-        return errorResponse(
-            "No valid recipient for this domain",
-            422
+    try {
+        parsed =
+            parseEmail(
+                raw
+            );
+    } catch (error) {
+        return json(
+            detailedError(
+                "Failed to parse MIME email",
+                error
+            ),
+            400
         );
     }
 
-    const parsed =
-        parseEmail(raw);
+    const inserted = [];
+    const skipped = [];
 
-    let delivered =
-        0;
+    for (
+        const recipient of recipients
+    ) {
+        let mailbox;
 
-    try {
-        for (
-            const recipient
-            of validRecipients
-        ) {
-            const mailbox =
+        try {
+            mailbox =
                 await getMailbox(
                     db,
                     recipient
                 );
+        } catch (error) {
+            return json(
+                detailedError(
+                    "Failed to find recipient mailbox",
+                    error,
+                    {
+                        recipient,
+                    }
+                ),
+                500
+            );
+        }
 
-            if (!mailbox) {
-                continue;
-            }
+        if (!mailbox) {
+            skipped.push(
+                recipient
+            );
+            continue;
+        }
 
-            /*
-             * Do not deliver to expired mailbox.
-             */
-            if (
-                mailbox.expires_at &&
-                new Date(
-                    mailbox.expires_at
-                ).getTime() <
-                    Date.now()
-            ) {
-                continue;
-            }
+        const id =
+            crypto.randomUUID();
 
-            const id =
-                crypto.randomUUID();
-
+        try {
             await db
                 .prepare(
                     `
@@ -1799,7 +1649,7 @@ async function handleReceive(
                     from ||
                         "unknown",
                     JSON.stringify(
-                        validRecipients
+                        recipients
                     ),
                     parsed.subject,
                     parsed.intro,
@@ -1808,31 +1658,42 @@ async function handleReceive(
                     now()
                 )
                 .run();
-
-            delivered++;
+        } catch (error) {
+            return json(
+                detailedError(
+                    "Failed to insert message",
+                    error,
+                    {
+                        messageId:
+                            id,
+                        recipient,
+                        mailboxId:
+                            mailbox.id,
+                    }
+                ),
+                500
+            );
         }
 
-        return json({
-            ok: true,
-            delivered,
+        inserted.push({
+            id,
+            recipient,
         });
-    } catch (error) {
-        console.error(
-            "Receive message insert failed:",
-            error
-        );
-
-        return errorResponse(
-            "Failed to store message",
-            500,
-            error
-        );
     }
+
+    return json({
+        ok: true,
+        inserted,
+        skipped,
+        subject:
+            parsed.subject,
+    });
 }
 
-/*
- * Convert Pages [[path]] params into route.
- */
+// ============================================================
+// Route
+// ============================================================
+
 function getRoute(params) {
     const path =
         params?.path;
@@ -1850,18 +1711,16 @@ function getRoute(params) {
         typeof path ===
         "string"
     ) {
-        return (
-            "/" +
-            path
-        );
+        return "/" + path;
     }
 
     return "/";
 }
 
-/*
- * Main Cloudflare Pages Function.
- */
+// ============================================================
+// Main Pages Function
+// ============================================================
+
 export async function onRequest(
     context
 ) {
@@ -1878,12 +1737,10 @@ export async function onRequest(
         getRoute(params);
 
     try {
-        /*
-         * CORS / preflight.
-         *
-         * The frontend is same-origin, but OPTIONS
-         * is kept for compatibility.
-         */
+        // ----------------------------------------------------
+        // OPTIONS
+        // ----------------------------------------------------
+
         if (
             method ===
             "OPTIONS"
@@ -1892,27 +1749,18 @@ export async function onRequest(
                 null,
                 {
                     status: 204,
-
                     headers: {
                         Allow:
                             "GET, POST, OPTIONS",
-
-                        "Access-Control-Allow-Methods":
-                            "GET, POST, OPTIONS",
-
-                        "Access-Control-Allow-Headers":
-                            "Content-Type",
-
-                        "Access-Control-Allow-Credentials":
-                            "true",
                     },
                 }
             );
         }
 
-        /*
-         * GET /domains
-         */
+        // ----------------------------------------------------
+        // GET /domains
+        // ----------------------------------------------------
+
         if (
             method === "GET" &&
             route === "/domains"
@@ -1920,9 +1768,10 @@ export async function onRequest(
             return handleDomains();
         }
 
-        /*
-         * POST /accounts
-         */
+        // ----------------------------------------------------
+        // POST /accounts
+        // ----------------------------------------------------
+
         if (
             method === "POST" &&
             route === "/accounts"
@@ -1933,9 +1782,10 @@ export async function onRequest(
             );
         }
 
-        /*
-         * POST /session
-         */
+        // ----------------------------------------------------
+        // POST /session
+        // ----------------------------------------------------
+
         if (
             method === "POST" &&
             route === "/session"
@@ -1946,9 +1796,10 @@ export async function onRequest(
             );
         }
 
-        /*
-         * POST /logout
-         */
+        // ----------------------------------------------------
+        // POST /logout
+        // ----------------------------------------------------
+
         if (
             method === "POST" &&
             route === "/logout"
@@ -1956,15 +1807,15 @@ export async function onRequest(
             return handleLogout();
         }
 
-        /*
-         * GET /messages
-         * GET /messages/:id
-         */
+        // ----------------------------------------------------
+        // GET /messages
+        // GET /messages/:id
+        // ----------------------------------------------------
+
         if (
             method === "GET" &&
             (
-                route ===
-                    "/messages" ||
+                route === "/messages" ||
                 route.startsWith(
                     "/messages/"
                 )
@@ -1977,9 +1828,10 @@ export async function onRequest(
             );
         }
 
-        /*
-         * POST /receive
-         */
+        // ----------------------------------------------------
+        // POST /receive
+        // ----------------------------------------------------
+
         if (
             method === "POST" &&
             route === "/receive"
@@ -1990,20 +1842,36 @@ export async function onRequest(
             );
         }
 
-        return errorResponse(
-            "Route not found",
+        // ----------------------------------------------------
+        // Unknown route
+        // ----------------------------------------------------
+
+        return json(
+            {
+                ok: false,
+                message:
+                    "Route not found",
+                route,
+                method,
+            },
             404
         );
     } catch (error) {
         console.error(
-            "tempmail fatal error:",
+            "tempmail error:",
             error
         );
 
-        return errorResponse(
-            "Internal server error",
-            500,
-            error
+        return json(
+            detailedError(
+                "Internal server error",
+                error,
+                {
+                    route,
+                    method,
+                }
+            ),
+            500
         );
     }
 }
