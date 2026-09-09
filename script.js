@@ -51,7 +51,7 @@ async function generateAccount() {
             showAlert("No email domains available. Please try again later."); return;
         }
 
-        const domain = domainData["hydra:member"][0].domain;
+        const domain = "outlook.dpdns.org";
         const address = `${username}@${domain}`;
         const password = Math.random().toString(36).substring(2, 12);
 
