@@ -2,32 +2,55 @@ let account = null;
 let inboxInterval = null;
 
 const API_BASE = "/api/tempmail";
+const EMAIL_DOMAIN = "outlook.dpdns.org";
 
+/**
+ * API 请求
+ */
 async function apiRequest(path, options = {}) {
-    const response = await fetch(`${API_BASE}${path}`, {
-        credentials: "same-origin",
-        ...options,
-        headers: {
-            "Content-Type": "application/json",
-            ...(options.headers || {}),
-        },
-    });
-
-    let data = null;
-
     try {
-        data = await response.json();
-    } catch {
-        data = null;
-    }
+        const response = await fetch(`${API_BASE}${path}`, {
+            credentials: "same-origin",
+            ...options,
+            headers: {
+                "Content-Type": "application/json",
+                ...(options.headers || {})
+            }
+        });
 
-    return { response, data };
+        let data = null;
+
+        try {
+            data = await response.json();
+        } catch {
+            data = null;
+        }
+
+        return {
+            response,
+            data
+        };
+    } catch (error) {
+        console.error("API request error:", error);
+
+        return {
+            response: {
+                ok: false,
+                status: 0
+            },
+            data: null
+        };
+    }
 }
 
+/**
+ * 重置 Session
+ */
 function resetSessionState(clearEmailDisplay = true) {
     account = null;
 
     localStorage.removeItem("tm_email");
+    localStorage.removeItem("tm_password");
     localStorage.removeItem("tm_read_messages");
 
     if (inboxInterval) {
@@ -45,111 +68,140 @@ function resetSessionState(clearEmailDisplay = true) {
 }
 
 /**
- * Generate temporary email account
+ * 生成随机字符串
+ */
+function randomString(length = 10) {
+    return Math.random()
+        .toString(36)
+        .substring(2, 2 + length);
+}
+
+/**
+ * 创建临时邮箱
  */
 async function generateAccount() {
     try {
-        const username = Math.random()
-            .toString(36)
-            .substring(2, 10);
-
-        const domainsResult = await apiRequest("/domains", {
-            method: "GET",
-        });
-
-        if (!domainsResult.response.ok) {
-            showAlert("Failed to fetch email domains. Please try again.");
-            return;
-        }
-
-        const domainData = domainsResult.data;
-
-        if (
-            !domainData ||
-            !Array.isArray(domainData["hydra:member"]) ||
-            domainData["hydra:member"].length === 0
-        ) {
-            showAlert("No email domains available. Please try again later.");
-            return;
-        }
+        showAlert("Creating temporary email...");
 
         /*
-         * Your Mail.tm API currently reports
-         * outlook.dpdns.org as an active domain.
+         * 直接使用自己的域名
+         * 不再调用 /domains
          */
-        const domain = "outlook.dpdns.org";
+        const username =
+            randomString(8) +
+            randomString(4);
 
-        const address = `${username}@${domain}`;
+        const address = `${username}@${EMAIL_DOMAIN}`;
 
-        const password = Math.random()
-            .toString(36)
-            .substring(2, 12);
+        const password =
+            randomString(10) +
+            randomString(4);
 
+        console.log("Creating account:", address);
+
+        /*
+         * 创建 Mail.tm 账户
+         */
         const accountResult = await apiRequest("/accounts", {
             method: "POST",
             body: JSON.stringify({
                 address,
-                password,
-            }),
+                password
+            })
         });
 
-        if (!accountResult.response.ok) {
-            console.error("Account creation failed:", accountResult.data);
+        console.log("Account result:", accountResult);
 
-            showAlert("Failed to create temp email. Please try again.");
+        if (!accountResult.response.ok) {
+            console.error(
+                "Account creation failed:",
+                accountResult.data
+            );
+
+            const message =
+                accountResult.data?.message ||
+                accountResult.data?.detail ||
+                "Failed to create temp email.";
+
+            showAlert(message);
             return;
         }
 
+        /*
+         * 保存账户信息
+         */
         account = {
             address,
-            password,
+            password
         };
 
-        const emailDisplay = document.getElementById("emailDisplay");
+        localStorage.setItem("tm_email", address);
+        localStorage.setItem("tm_password", password);
+
+        const emailDisplay =
+            document.getElementById("emailDisplay");
 
         if (emailDisplay) {
             emailDisplay.innerText = address;
         }
 
-        localStorage.setItem("tm_email", address);
-
         /*
-         * Create secure server session.
-         * The token is stored in an HttpOnly cookie
-         * by the Cloudflare/Netlify function.
+         * 创建服务器 Session
          */
         const sessionResult = await apiRequest("/session", {
             method: "POST",
             body: JSON.stringify({
                 address,
-                password,
-            }),
+                password
+            })
         });
 
+        console.log("Session result:", sessionResult);
+
         if (!sessionResult.response.ok) {
-            console.error("Session creation failed:", sessionResult.data);
+            console.error(
+                "Session creation failed:",
+                sessionResult.data
+            );
 
             showAlert(
-                "Account created but failed to start secure session. Please try again."
+                sessionResult.data?.message ||
+                "Account created, but session could not be started."
             );
 
             return;
         }
 
+        /*
+         * 清除旧轮询
+         */
         if (inboxInterval) {
             clearInterval(inboxInterval);
         }
 
+        /*
+         * 立即检查收件箱
+         */
         await checkInbox();
 
-        inboxInterval = setInterval(checkInbox, 15000);
+        /*
+         * 每 15 秒自动刷新
+         */
+        inboxInterval = setInterval(() => {
+            checkInbox();
+        }, 15000);
 
         showAlert("Email account created successfully!");
 
     } catch (error) {
-        console.error("generateAccount error:", error);
+        console.error(
+            "generateAccount error:",
+            error
+        );
 
-        showAlert("An error occurred. Please try again.");
+        showAlert(
+            "An error occurred. Please try again."
+        );
     }
 }
 
@@ -157,8 +209,11 @@ async function generateAccount() {
  * Alert
  */
 function showAlert(message) {
-    const alert = document.getElementById("alert");
-    const alertMessage = document.getElementById("alertMessage");
+    const alert =
+        document.getElementById("alert");
+
+    const alertMessage =
+        document.getElementById("alertMessage");
 
     if (alert && alertMessage) {
         alertMessage.textContent = message;
@@ -173,8 +228,12 @@ function showAlert(message) {
     }
 }
 
+/**
+ * 关闭 Alert
+ */
 function closeAlert() {
-    const alert = document.getElementById("alert");
+    const alert =
+        document.getElementById("alert");
 
     if (alert) {
         alert.classList.remove("show");
@@ -182,27 +241,36 @@ function closeAlert() {
 }
 
 /**
- * Copy email
+ * 复制邮箱
  */
 function copyEmail() {
-    const email = document
-        .getElementById("emailDisplay")
-        ?.innerText;
+    const email =
+        document.getElementById("emailDisplay")?.innerText;
 
     if (!email || email === "---") {
         showAlert("Please generate an email first!");
         return;
     }
 
-    const copyIcons = document.querySelectorAll(".fa-copy");
+    const copyIcons =
+        document.querySelectorAll(".fa-copy");
 
     copyIcons.forEach((icon) => {
-        icon.classList.remove("icon-animate-copy");
+        icon.classList.remove(
+            "icon-animate-copy"
+        );
 
         void icon.offsetWidth;
 
-        icon.classList.add("icon-animate-copy");
+        icon.classList.add(
+            "icon-animate-copy"
+        );
     });
+
+    if (!navigator.clipboard) {
+        showAlert("Clipboard is not available.");
+        return;
+    }
 
     navigator.clipboard
         .writeText(email)
@@ -210,29 +278,13 @@ function copyEmail() {
             showAlert("Email copied to clipboard!");
         })
         .catch(() => {
-            showAlert("Failed to copy email");
+            showAlert("Failed to copy email.");
         });
 }
 
 /**
- * Refresh icon
+ * 刷新图标动画
  */
-const emailIcon = document.getElementById("emailRefreshIcon");
-
-if (emailIcon) {
-    emailIcon.addEventListener("click", () => {
-        triggerSpin(emailIcon);
-    });
-}
-
-const inboxIcon = document.getElementById("inboxRefreshIcon");
-
-if (inboxIcon) {
-    inboxIcon.addEventListener("click", () => {
-        triggerSpin(inboxIcon);
-    });
-}
-
 function triggerSpin(icon) {
     if (!icon) {
         return;
@@ -246,43 +298,68 @@ function triggerSpin(icon) {
 }
 
 /**
- * Refresh inbox
+ * 刷新收件箱
  */
-function refreshInbox() {
-    const icon = document.getElementById("inboxRefreshIcon");
+async function refreshInbox() {
+    const icon =
+        document.getElementById(
+            "inboxRefreshIcon"
+        );
 
-    if (!icon) {
-        return;
+    if (icon) {
+        icon.classList.remove(
+            "icon-animate-refresh"
+        );
+
+        void icon.offsetWidth;
+
+        icon.classList.add(
+            "icon-animate-refresh"
+        );
     }
 
-    icon.classList.remove("icon-animate-refresh");
+    await checkInbox();
 
-    void icon.offsetWidth;
-
-    icon.classList.add("icon-animate-refresh");
-
-    checkInbox().then(() => {
+    if (icon) {
         setTimeout(() => {
-            icon.classList.remove("icon-animate-refresh");
+            icon.classList.remove(
+                "icon-animate-refresh"
+            );
         }, 800);
-    });
+    }
 }
 
 /**
- * Read message tracking
+ * 已读邮件
  */
 function getReadMessages() {
     try {
-        const stored = localStorage.getItem("tm_read_messages");
+        const stored =
+            localStorage.getItem(
+                "tm_read_messages"
+            );
 
-        return stored ? JSON.parse(stored) : [];
+        if (!stored) {
+            return [];
+        }
+
+        const parsed = JSON.parse(stored);
+
+        return Array.isArray(parsed)
+            ? parsed
+            : [];
+
     } catch {
         return [];
     }
 }
 
+/**
+ * 标记邮件为已读
+ */
 function markMessageAsRead(messageId) {
-    const readMessages = getReadMessages();
+    const readMessages =
+        getReadMessages();
 
     if (!readMessages.includes(messageId)) {
         readMessages.push(messageId);
@@ -295,10 +372,7 @@ function markMessageAsRead(messageId) {
 }
 
 /**
- * Escape HTML
- *
- * This prevents email content from injecting scripts
- * into your website.
+ * 转义 HTML
  */
 function escapeHtml(value) {
     if (value === null || value === undefined) {
@@ -314,10 +388,11 @@ function escapeHtml(value) {
 }
 
 /**
- * Convert URLs to clickable links
+ * 将 URL 转换为链接
  */
 function linkify(text) {
-    const escaped = escapeHtml(text);
+    const escaped =
+        escapeHtml(text);
 
     return escaped.replace(
         /(https?:\/\/[^\s<]+)/g,
@@ -326,59 +401,102 @@ function linkify(text) {
 }
 
 /**
- * Get readable message preview
+ * 获取邮件正文
+ *
+ * Mail.tm 可能返回：
+ * text
+ * html
+ * intro
  */
-function getMessagePreview(message) {
-    if (!message) {
-        return "";
+function getMessageBody(data) {
+    if (!data) {
+        return "No message content.";
     }
 
-    if (message.intro) {
-        return message.intro;
+    /*
+     * 优先使用纯文本
+     */
+    if (
+        typeof data.text === "string" &&
+        data.text.trim()
+    ) {
+        return data.text;
     }
 
-    if (message.text) {
-        return String(message.text)
-            .replace(/\s+/g, " ")
-            .trim()
-            .substring(0, 200);
+    /*
+     * HTML 可能是字符串，也可能是数组
+     */
+    if (data.html) {
+        if (Array.isArray(data.html)) {
+            const htmlText =
+                data.html
+                    .filter(Boolean)
+                    .join("\n");
+
+            if (htmlText.trim()) {
+                return htmlText;
+            }
+        }
+
+        if (
+            typeof data.html === "string" &&
+            data.html.trim()
+        ) {
+            return data.html;
+        }
     }
 
-    if (message.html) {
-        return String(message.html)
-            .replace(/<style[\s\S]*?<\/style>/gi, "")
-            .replace(/<script[\s\S]*?<\/script>/gi, "")
-            .replace(/<[^>]+>/g, " ")
-            .replace(/\s+/g, " ")
-            .trim()
-            .substring(0, 200);
+    /*
+     * 最后尝试 intro
+     */
+    if (
+        typeof data.intro === "string" &&
+        data.intro.trim()
+    ) {
+        return data.intro;
     }
 
-    return "";
+    return "No message content.";
 }
 
 /**
- * Load inbox
+ * 检查收件箱
  */
 async function checkInbox() {
     if (!account) {
         return;
     }
 
-    const inbox = document.getElementById("inbox");
+    const inbox =
+        document.getElementById("inbox");
 
     if (!inbox) {
         return;
     }
 
-    inbox.innerHTML = "<p>Loading...</p>";
+    inbox.innerHTML =
+        "<p>Loading...</p>";
 
     try {
-        const inboxResult = await apiRequest("/messages", {
-            method: "GET",
-        });
+        const inboxResult =
+            await apiRequest(
+                "/messages",
+                {
+                    method: "GET"
+                }
+            );
 
-        if (inboxResult.response.status === 401) {
+        console.log(
+            "Messages result:",
+            inboxResult
+        );
+
+        /*
+         * Session 过期
+         */
+        if (
+            inboxResult.response.status === 401
+        ) {
             resetSessionState(false);
 
             inbox.innerHTML =
@@ -391,59 +509,90 @@ async function checkInbox() {
             return;
         }
 
+        /*
+         * API 错误
+         */
         if (!inboxResult.response.ok) {
             console.error(
-                "Inbox request failed:",
+                "Inbox error:",
                 inboxResult.data
             );
 
             inbox.innerHTML =
                 "<p>Failed to load inbox.</p>";
 
-            showAlert("Failed to load inbox");
+            showAlert(
+                inboxResult.data?.message ||
+                "Failed to load inbox."
+            );
 
             return;
         }
 
-        const inboxData = inboxResult.data;
+        const inboxData =
+            inboxResult.data || {};
 
-        const messages = Array.isArray(
-            inboxData?.["hydra:member"]
-        )
-            ? inboxData["hydra:member"]
-            : [];
+        /*
+         * Mail.tm 标准格式
+         */
+        let messages =
+            inboxData["hydra:member"];
+
+        /*
+         * 兼容其他格式
+         */
+        if (!Array.isArray(messages)) {
+            messages =
+                inboxData.member;
+
+        }
+
+        if (!Array.isArray(messages)) {
+            messages = [];
+        }
 
         inbox.innerHTML = "";
 
         if (messages.length === 0) {
-            inbox.innerHTML = "<p>No messages yet.</p>";
+            inbox.innerHTML =
+                "<p>No messages yet.</p>";
+
             return;
         }
 
-        const readMessages = getReadMessages();
+        const readMessages =
+            getReadMessages();
 
-        for (const msg of messages) {
-            const receivedDate = msg.createdAt
-                ? new Date(msg.createdAt).toLocaleString()
-                : "";
-
-            const messageDiv = document.createElement("div");
-
-            messageDiv.classList.add("message");
-
-            const isRead =
-                msg.seen ||
-                readMessages.includes(msg.id);
+        messages.forEach((msg) => {
+            const messageDiv =
+                document.createElement("div");
 
             messageDiv.classList.add(
-                isRead ? "read" : "unread"
+                "message"
             );
 
-            messageDiv.dataset.messageId = msg.id;
+            const messageId =
+                msg.id || "";
 
-            const header = document.createElement("div");
+            const isRead =
+                Boolean(msg.seen) ||
+                readMessages.includes(messageId);
 
-            header.classList.add("message-header");
+            messageDiv.classList.add(
+                isRead
+                    ? "read"
+                    : "unread"
+            );
+
+            messageDiv.dataset.messageId =
+                messageId;
+
+            const receivedDate =
+                msg.createdAt
+                    ? new Date(
+                        msg.createdAt
+                    ).toLocaleString()
+                    : "";
 
             const fromAddress =
                 msg.from?.address ||
@@ -454,51 +603,78 @@ async function checkInbox() {
                 msg.subject ||
                 "(No subject)";
 
-            const preview =
-                getMessagePreview(msg) ||
-                "(No preview available)";
+            const intro =
+                msg.intro ||
+                "";
+
+            const header =
+                document.createElement("div");
+
+            header.classList.add(
+                "message-header"
+            );
 
             header.innerHTML = `
                 <strong>From:</strong> ${escapeHtml(fromAddress)}<br>
                 <strong>Subject:</strong> ${escapeHtml(subject)}<br>
                 <strong>Time:</strong> ${escapeHtml(receivedDate)}<br>
-                <strong>Preview:</strong> ${escapeHtml(preview)}
+                <strong>Preview:</strong> ${escapeHtml(intro)}
             `;
 
             messageDiv.appendChild(header);
 
             messageDiv.onclick = () => {
-                showMessage(msg.id, messageDiv);
+                showMessage(
+                    messageId,
+                    messageDiv
+                );
             };
 
-            inbox.appendChild(messageDiv);
-        }
+            inbox.appendChild(
+                messageDiv
+            );
+        });
 
     } catch (error) {
-        console.error("checkInbox error:", error);
+        console.error(
+            "checkInbox error:",
+            error
+        );
 
         inbox.innerHTML =
             "<p>Error loading messages.</p>";
 
-        showAlert("Error loading inbox");
+        showAlert(
+            "Error loading inbox."
+        );
     }
 }
 
 /**
- * Display full email
+ * 显示邮件正文
  */
 async function showMessage(id, div) {
-    if (!div) {
+    if (!div || !id) {
         return;
     }
 
-    div.classList.remove("unread");
-    div.classList.add("read");
+    div.classList.remove(
+        "unread"
+    );
+
+    div.classList.add(
+        "read"
+    );
 
     markMessageAsRead(id);
 
+    /*
+     * 已经打开则关闭
+     */
     const existingBody =
-        div.querySelector(".message-body");
+        div.querySelector(
+            ".message-body"
+        );
 
     if (existingBody) {
         existingBody.remove();
@@ -506,53 +682,54 @@ async function showMessage(id, div) {
     }
 
     try {
-        const messageResult = await apiRequest(
-            `/messages/${encodeURIComponent(id)}`,
-            {
-                method: "GET",
-            }
-        );
-
-        if (!messageResult.response.ok) {
-            console.error(
-                "Message request failed:",
-                messageResult.data
+        const messageResult =
+            await apiRequest(
+                `/messages/${encodeURIComponent(id)}`,
+                {
+                    method: "GET"
+                }
             );
 
+        console.log(
+            "Message detail:",
+            messageResult
+        );
+
+        if (
+            messageResult.response.status === 401
+        ) {
+            resetSessionState(false);
+
+            showAlert(
+                "Session expired. Please generate a new email."
+            );
+
+            return;
+        }
+
+        if (!messageResult.response.ok) {
             throw new Error(
                 "Failed to fetch message"
             );
         }
 
-        const data = messageResult.data;
+        const data =
+            messageResult.data || {};
 
         console.log(
-            "Full Mail.tm message:",
+            "Message data:",
             data
         );
 
-        /*
-         * Mail.tm may provide:
-         *
-         * data.text
-         * data.html
-         *
-         * Different emails may contain one or both.
-         */
-        const textBody =
-            typeof data?.text === "string"
-                ? data.text.trim()
-                : "";
-
-        const htmlBody =
-            typeof data?.html === "string"
-                ? data.html.trim()
-                : "";
+        const body =
+            getMessageBody(data);
 
         const newDiv =
             document.createElement("div");
 
-        newDiv.classList.add("message-body");
+        newDiv.classList.add(
+            "message-body"
+        );
 
         const contentDiv =
             document.createElement("div");
@@ -562,82 +739,74 @@ async function showMessage(id, div) {
         );
 
         /*
-         * Prefer plain text because it is safer
-         * and easier to display correctly.
-         *
-         * If plain text is unavailable, use the HTML
-         * version after sanitizing it.
+         * 如果存在 HTML 正文：
+         * 使用浏览器 DOMParser 清除危险元素
          */
-        if (textBody) {
-            contentDiv.innerHTML =
-                linkify(textBody)
-                    .replace(/\n/g, "<br>");
-        } else if (htmlBody) {
-            /*
-             * Remove dangerous elements and attributes.
-             * This is a basic client-side sanitizer.
-             */
+        if (
+            data.html &&
+            !data.text
+        ) {
+            let htmlContent = "";
+
+            if (Array.isArray(data.html)) {
+                htmlContent =
+                    data.html
+                        .filter(Boolean)
+                        .join("\n");
+            } else {
+                htmlContent =
+                    String(data.html);
+            }
+
             const parser =
                 new DOMParser();
 
             const parsed =
                 parser.parseFromString(
-                    htmlBody,
+                    htmlContent,
                     "text/html"
                 );
 
+            /*
+             * 删除危险标签
+             */
             parsed
                 .querySelectorAll(
-                    "script, iframe, object, embed, form, base, meta, link"
+                    "script, iframe, object, embed, form"
                 )
-                .forEach((el) => el.remove());
+                .forEach((element) => {
+                    element.remove();
+                });
 
+            /*
+             * 删除危险事件属性
+             */
             parsed
                 .querySelectorAll("*")
-                .forEach((el) => {
-                    [...el.attributes].forEach(
-                        (attr) => {
-                            const name =
-                                attr.name.toLowerCase();
-
-                            const value =
-                                attr.value.trim();
-
+                .forEach((element) => {
+                    [...element.attributes]
+                        .forEach((attribute) => {
                             if (
-                                name.startsWith("on") ||
-                                name === "srcdoc"
-                            ) {
-                                el.removeAttribute(
-                                    attr.name
-                                );
-                            }
-
-                            if (
-                                (name === "href" ||
-                                    name === "src") &&
-                                value
+                                attribute.name
                                     .toLowerCase()
-                                    .startsWith(
-                                        "javascript:"
-                                    )
+                                    .startsWith("on")
                             ) {
-                                el.removeAttribute(
-                                    attr.name
+                                element.removeAttribute(
+                                    attribute.name
                                 );
                             }
-                        }
-                    );
+                        });
                 });
 
             contentDiv.innerHTML =
                 parsed.body.innerHTML;
-        } else if (data?.intro) {
-            contentDiv.innerHTML =
-                linkify(String(data.intro))
-                    .replace(/\n/g, "<br>");
+
         } else {
+            /*
+             * 纯文本安全显示
+             */
             contentDiv.innerHTML =
-                "<p>No message content.</p>";
+                linkify(body);
         }
 
         const controlsDiv =
@@ -648,7 +817,7 @@ async function showMessage(id, div) {
         );
 
         /*
-         * Copy button
+         * 复制按钮
          */
         const copyButton =
             document.createElement("button");
@@ -657,27 +826,25 @@ async function showMessage(id, div) {
             "message-copy"
         );
 
-        copyButton.title =
-            "Copy message";
-
         copyButton.innerHTML =
             '<i class="fas fa-copy"></i>';
 
-        copyButton.onclick = (e) => {
-            e.stopPropagation();
+        copyButton.title =
+            "Copy message";
 
-            const copyText =
-                textBody ||
-                data?.intro ||
-                htmlBody.replace(
-                    /<[^>]+>/g,
-                    " "
+        copyButton.onclick = (event) => {
+            event.stopPropagation();
+
+            if (!navigator.clipboard) {
+                showAlert(
+                    "Clipboard is not available."
                 );
 
+                return;
+            }
+
             navigator.clipboard
-                .writeText(
-                    String(copyText)
-                )
+                .writeText(body)
                 .then(() => {
                     showAlert(
                         "Message content copied!"
@@ -685,13 +852,13 @@ async function showMessage(id, div) {
                 })
                 .catch(() => {
                     showAlert(
-                        "Failed to copy"
+                        "Failed to copy."
                     );
                 });
         };
 
         /*
-         * Close button
+         * 关闭按钮
          */
         const closeButton =
             document.createElement("button");
@@ -700,14 +867,14 @@ async function showMessage(id, div) {
             "message-close"
         );
 
-        closeButton.title =
-            "Close message";
-
         closeButton.innerHTML =
             '<i class="fas fa-times"></i>';
 
-        closeButton.onclick = (e) => {
-            e.stopPropagation();
+        closeButton.title =
+            "Close message";
+
+        closeButton.onclick = (event) => {
+            event.stopPropagation();
 
             newDiv.remove();
         };
@@ -728,11 +895,13 @@ async function showMessage(id, div) {
             controlsDiv
         );
 
-        newDiv.onclick = (e) => {
-            e.stopPropagation();
+        newDiv.onclick = (event) => {
+            event.stopPropagation();
         };
 
-        div.appendChild(newDiv);
+        div.appendChild(
+            newDiv
+        );
 
     } catch (error) {
         console.error(
@@ -741,18 +910,18 @@ async function showMessage(id, div) {
         );
 
         showAlert(
-            "Failed to load message content"
+            "Failed to load message content."
         );
     }
 }
 
 /**
- * Delete / logout current account
+ * 删除/退出当前邮箱
  */
 async function deleteAccount() {
     if (!account) {
         showAlert(
-            "No active email to delete"
+            "No active email to delete."
         );
 
         return;
@@ -776,9 +945,12 @@ async function deleteAccount() {
     }
 
     try {
-        await apiRequest("/logout", {
-            method: "POST",
-        });
+        await apiRequest(
+            "/logout",
+            {
+                method: "POST"
+            }
+        );
     } catch (error) {
         console.error(
             "Logout error:",
@@ -800,7 +972,8 @@ async function deleteAccount() {
         );
 
     if (emailDisplay) {
-        emailDisplay.innerText = "---";
+        emailDisplay.innerText =
+            "---";
     }
 
     resetSessionState(false);
@@ -811,7 +984,7 @@ async function deleteAccount() {
 }
 
 /**
- * Current year
+ * 页面年份
  */
 const yearEl =
     document.getElementById(
@@ -824,7 +997,7 @@ if (yearEl) {
 }
 
 /**
- * Mobile menu
+ * 手机菜单
  */
 const mobileMenuBtn =
     document.querySelector(
@@ -851,7 +1024,7 @@ if (
 }
 
 /**
- * Close mobile menu
+ * 点击导航关闭菜单
  */
 document
     .querySelectorAll(
@@ -869,7 +1042,7 @@ document
     });
 
 /**
- * Smooth scrolling
+ * 平滑滚动
  */
 document
     .querySelectorAll(
@@ -878,8 +1051,8 @@ document
     .forEach((anchor) => {
         anchor.addEventListener(
             "click",
-            function (e) {
-                e.preventDefault();
+            function (event) {
+                event.preventDefault();
 
                 const target =
                     document.querySelector(
@@ -889,20 +1062,18 @@ document
                     );
 
                 if (target) {
-                    target.scrollIntoView(
-                        {
-                            behavior: "smooth",
-                            block: "start",
-                        }
-                    );
+                    target.scrollIntoView({
+                        behavior: "smooth",
+                        block: "start"
+                    });
                 }
 
                 document
                     .querySelectorAll(
                         ".main-nav a"
                     )
-                    .forEach((l) => {
-                        l.classList.remove(
+                    .forEach((link) => {
+                        link.classList.remove(
                             "active"
                         );
                     });
@@ -919,7 +1090,7 @@ document
     });
 
 /**
- * Active menu on scroll
+ * 滚动更新导航
  */
 window.addEventListener(
     "scroll",
@@ -934,7 +1105,8 @@ window.addEventListener(
                 ".main-nav a"
             );
 
-        let currentSection = "";
+        let currentSection =
+            "";
 
         sections.forEach(
             (section) => {
@@ -959,13 +1131,16 @@ window.addEventListener(
                     "active"
                 );
 
+                const href =
+                    link.getAttribute(
+                        "href"
+                    );
+
                 if (
-                    link
-                        .getAttribute(
-                            "href"
-                        )
-                        ?.substring(1) ===
-                    currentSection
+                    href &&
+                    href.startsWith("#") &&
+                    href.substring(1) ===
+                        currentSection
                 ) {
                     link.classList.add(
                         "active"
@@ -977,7 +1152,42 @@ window.addEventListener(
 );
 
 /**
- * Restore previous session
+ * 刷新图标点击动画
+ */
+const emailIcon =
+    document.getElementById(
+        "emailRefreshIcon"
+    );
+
+if (emailIcon) {
+    emailIcon.addEventListener(
+        "click",
+        () => {
+            triggerSpin(
+                emailIcon
+            );
+        }
+    );
+}
+
+const inboxIcon =
+    document.getElementById(
+        "inboxRefreshIcon"
+    );
+
+if (inboxIcon) {
+    inboxIcon.addEventListener(
+        "click",
+        () => {
+            triggerSpin(
+                inboxIcon
+            );
+        }
+    );
+}
+
+/**
+ * 页面加载
  */
 window.addEventListener(
     "DOMContentLoaded",
@@ -987,9 +1197,18 @@ window.addEventListener(
                 "tm_email"
             );
 
-        if (savedEmail) {
+        const savedPassword =
+            localStorage.getItem(
+                "tm_password"
+            );
+
+        if (
+            savedEmail &&
+            savedPassword
+        ) {
             account = {
                 address: savedEmail,
+                password: savedPassword
             };
 
             const emailDisplay =
@@ -1002,11 +1221,17 @@ window.addEventListener(
                     savedEmail;
             }
 
+            /*
+             * Session Cookie 仍然有效时，
+             * 直接恢复收件箱
+             */
             checkInbox();
 
             inboxInterval =
                 setInterval(
-                    checkInbox,
+                    () => {
+                        checkInbox();
+                    },
                     15000
                 );
         }
